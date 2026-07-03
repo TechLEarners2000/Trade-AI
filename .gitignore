@@ -31,3 +31,6 @@ Thumbs.db
 backend/alembic/versions/*.pyc
 *.db
 *.sqlite3
+
+code.py
+code.md
