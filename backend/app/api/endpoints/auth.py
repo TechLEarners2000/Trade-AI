@@ -10,14 +10,19 @@ from app.schemas.user import (
 )
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.core.security import hash_password
+from app.core.security import hash_password, decode_token
 from sqlalchemy import select
+from slowapi.util import get_remote_address
+from slowapi import Limiter
+from app.core.config import settings
 
+limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
 
 
 @router.post("/register", response_model=TokenResponse)
-async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
+@limiter.limit(settings.RATE_LIMIT_REGISTER)
+async def register(data: UserCreate, request: Request, db: AsyncSession = Depends(get_db)):
     service = AuthService(db)
     result = await service.register(data)
     return {
@@ -29,6 +34,7 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit(settings.RATE_LIMIT_LOGIN)
 async def login(data: UserLogin, request: Request, db: AsyncSession = Depends(get_db)):
     service = AuthService(db)
     result = await service.login(data, request.client.host)
@@ -38,6 +44,22 @@ async def login(data: UserLogin, request: Request, db: AsyncSession = Depends(ge
         "token_type": "bearer",
         "user": UserResponse.model_validate(result["user"]),
     }
+
+
+@router.post("/logout")
+async def logout(request: Request, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "")
+    service = AuthService(db)
+    await service.logout(token)
+    return {"message": "Logged out successfully"}
+
+
+@router.post("/logout-all")
+async def logout_all(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    service = AuthService(db)
+    await service.logout_all_sessions(str(current_user.id))
+    return {"message": "All sessions logged out successfully"}
 
 
 @router.post("/google", response_model=TokenResponse)

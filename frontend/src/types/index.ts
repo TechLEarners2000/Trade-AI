@@ -133,6 +133,13 @@ export interface BacktestStrategy {
   created_at: string
 }
 
+export interface CursorPage<T> {
+  items: T[]
+  next_cursor?: string
+  has_more: boolean
+  total?: number
+}
+
 export interface BacktestResult {
   id: string
   symbol: string

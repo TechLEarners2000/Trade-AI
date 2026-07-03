@@ -1,8 +1,13 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { useSelector } from 'react-redux'
+import { useEffect } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
+import { useSelector, useDispatch } from 'react-redux'
 import type { RootState } from '@/store'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Toaster } from 'react-hot-toast'
+import { setNavigate, setLogoutHandler } from '@/lib/navigate'
+import { logout } from '@/store/authSlice'
 import Layout from '@/components/layout/Layout'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import Login from '@/pages/auth/Login'
 import Register from '@/pages/auth/Register'
 import Dashboard from '@/pages/dashboard/Dashboard'
@@ -35,43 +40,69 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+function AppInitializer() {
+  const dispatch = useDispatch()
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    setNavigate((path: string) => navigate(path, { replace: true }))
+    setLogoutHandler(() => dispatch(logout()))
+  }, [dispatch, navigate])
+
+  return null
+}
+
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <AppInitializer />
+          <Toaster
+            position="top-right"
+            toastOptions={{
+              duration: 4000,
+              style: {
+                background: 'hsl(var(--card))',
+                color: 'hsl(var(--foreground))',
+                border: '1px solid hsl(var(--border))',
+              },
+            }}
+          />
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/register" element={<Register />} />
 
-          <Route path="/" element={
-            <ProtectedRoute>
-              <Layout />
-            </ProtectedRoute>
-          }>
-            <Route index element={<Navigate to="/dashboard" replace />} />
-            <Route path="dashboard" element={<Dashboard />} />
-            <Route path="stocks" element={<Stocks />} />
-            <Route path="stocks/:symbol" element={<StockDetail />} />
-            <Route path="charts" element={<Charts />} />
-            <Route path="technical-analysis" element={<TechnicalAnalysis />} />
-            <Route path="scanner" element={<Scanner />} />
-            <Route path="watchlists" element={<Watchlists />} />
-            <Route path="portfolio" element={<Portfolio />} />
-            <Route path="backtesting" element={<Backtesting />} />
-            <Route path="alerts" element={<Alerts />} />
-            <Route path="ai-insights" element={<AIInsights />} />
-            <Route path="news" element={<News />} />
-            <Route path="learn" element={<Learning />} />
-            <Route path="admin" element={
-              <AdminRoute>
-                <Admin />
-              </AdminRoute>
-            } />
-          </Route>
+            <Route path="/" element={
+              <ProtectedRoute>
+                <Layout />
+              </ProtectedRoute>
+            }>
+              <Route index element={<Navigate to="/dashboard" replace />} />
+              <Route path="dashboard" element={<Dashboard />} />
+              <Route path="stocks" element={<Stocks />} />
+              <Route path="stocks/:symbol" element={<StockDetail />} />
+              <Route path="charts" element={<Charts />} />
+              <Route path="technical-analysis" element={<TechnicalAnalysis />} />
+              <Route path="scanner" element={<Scanner />} />
+              <Route path="watchlists" element={<Watchlists />} />
+              <Route path="portfolio" element={<Portfolio />} />
+              <Route path="backtesting" element={<Backtesting />} />
+              <Route path="alerts" element={<Alerts />} />
+              <Route path="ai-insights" element={<AIInsights />} />
+              <Route path="news" element={<News />} />
+              <Route path="learn" element={<Learning />} />
+              <Route path="admin" element={
+                <AdminRoute>
+                  <Admin />
+                </AdminRoute>
+              } />
+            </Route>
 
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
-        </Routes>
-      </BrowserRouter>
-    </QueryClientProvider>
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </QueryClientProvider>
+    </ErrorBoundary>
   )
 }

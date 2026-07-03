@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { navigate, triggerLogout } from './navigate'
 
 const api = axios.create({
   baseURL: '/api',
@@ -13,27 +14,65 @@ api.interceptors.request.use((config) => {
   return config
 })
 
+let isRefreshing = false
+let failedQueue: Array<{
+  resolve: (token: string) => void
+  reject: (error: unknown) => void
+}> = []
+
+function processQueue(error: unknown, token: string | null = null) {
+  failedQueue.forEach(({ resolve, reject }) => {
+    if (error) {
+      reject(error)
+    } else {
+      resolve(token!)
+    }
+  })
+  failedQueue = []
+}
+
+function redirectToLogin() {
+  triggerLogout()
+  navigate('/login')
+}
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    const hadAuth = !!originalRequest?.headers?.Authorization
+    if (error.response?.status === 401 && !originalRequest._retry && hadAuth) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject })
+        }).then((token) => {
+          originalRequest.headers.Authorization = `Bearer ${token}`
+          return api(originalRequest)
+        })
+      }
+
       originalRequest._retry = true
+      isRefreshing = true
+
       const refreshToken = localStorage.getItem('refresh_token')
       if (refreshToken) {
         try {
           const { data } = await axios.post('/api/auth/refresh', { refresh_token: refreshToken })
           localStorage.setItem('access_token', data.access_token)
           localStorage.setItem('refresh_token', data.refresh_token)
+          processQueue(null, data.access_token)
           originalRequest.headers.Authorization = `Bearer ${data.access_token}`
           return api(originalRequest)
-        } catch {
-          localStorage.removeItem('access_token')
-          localStorage.removeItem('refresh_token')
-          window.location.href = '/login'
+        } catch (err) {
+          processQueue(err, null)
+          redirectToLogin()
+          return Promise.reject(err)
+        } finally {
+          isRefreshing = false
         }
       } else {
-        window.location.href = '/login'
+        isRefreshing = false
+        redirectToLogin()
       }
     }
     return Promise.reject(error)
@@ -65,10 +104,11 @@ export const stocksAPI = {
 }
 
 export const dashboardAPI = {
-  getOverview: () => api.get('/dashboard/overview'),
+  getOverview: (limit: number = 50) => api.get(`/dashboard/overview?limit=${limit}`),
   getNews: () => api.get('/dashboard/news'),
-  getIndices: () => api.get('/dashboard/indices'),
-  getMovers: (type: string = 'gainers') => api.get(`/dashboard/market-movers?type=${type}`),
+  getIndices: (historyDays: number = 30) => api.get(`/dashboard/indices?history_days=${historyDays}`),
+  getMovers: (type: string = 'gainers', limit: number = 50) =>
+    api.get(`/dashboard/market-movers?type=${type}&limit=${limit}`),
 }
 
 export const scannerAPI = {

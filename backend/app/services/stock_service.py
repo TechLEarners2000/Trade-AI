@@ -2,7 +2,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
 from sqlalchemy.orm import joinedload
 from app.models.stock import Stock, StockPrice, StockFundamental
-from typing import Optional, List, Dict
+from app.core.redis_client import cached
+from app.core.pagination import encode_cursor, decode_cursor, CursorPage
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 
 
@@ -10,17 +12,40 @@ class StockService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def search_stocks(self, query: str, limit: int = 20) -> List[Stock]:
+    async def search_stocks(
+        self, query: str, limit: int = 20, cursor: Optional[str] = None
+    ) -> CursorPage[Dict[str, Any]]:
         stmt = (
             select(Stock)
             .filter(
                 Stock.is_active == True,
                 (Stock.symbol.ilike(f"%{query}%") | Stock.company_name.ilike(f"%{query}%"))
             )
-            .limit(limit)
+            .order_by(Stock.symbol)
+            .limit(limit + 1)
         )
+        if cursor:
+            decoded = decode_cursor(cursor)
+            if decoded:
+                stmt = stmt.filter(Stock.symbol > decoded)
+
         result = await self.db.execute(stmt)
-        return result.scalars().all()
+        rows = result.scalars().all()
+
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        items = [
+            {"id": str(s.id), "symbol": s.symbol, "company_name": s.company_name, "sector": s.sector}
+            for s in rows
+        ]
+
+        next_cursor = None
+        if has_more and rows:
+            next_cursor = encode_cursor(rows[-1].symbol)
+
+        return CursorPage(items=items, next_cursor=next_cursor, has_more=has_more)
 
     async def get_stock_by_symbol(self, symbol: str) -> Optional[Stock]:
         result = await self.db.execute(
@@ -31,8 +56,9 @@ class StockService:
         return result.scalar_one_or_none()
 
     async def get_stock_prices(
-        self, stock_id: str, interval: str = "1D", limit: int = 100
-    ) -> List[StockPrice]:
+        self, stock_id: str, interval: str = "1D", limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> CursorPage[Dict[str, Any]]:
         now = datetime.utcnow()
         if interval == "1D":
             since = now - timedelta(days=limit)
@@ -50,54 +76,86 @@ class StockService:
                 StockPrice.date >= since,
             )
             .order_by(StockPrice.date.asc())
-            .limit(limit)
+            .limit(limit + 1)
         )
+        if cursor:
+            decoded = decode_cursor(cursor)
+            if decoded:
+                try:
+                    cursor_date = datetime.fromisoformat(decoded)
+                    stmt = stmt.filter(StockPrice.date > cursor_date)
+                except ValueError:
+                    pass
+
         result = await self.db.execute(stmt)
-        return result.scalars().all()
+        rows = result.scalars().all()
 
-    async def get_market_overview(self) -> Dict:
-        nifty = await self._get_index_data("NIFTY")
-        sensex = await self._get_index_data("SENSEX")
-        banknifty = await self._get_index_data("BANKNIFTY")
-        vix = await self._get_index_data("INDIAVIX")
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
 
-        gainers = await self._get_top_movers("gainers", 10)
-        losers = await self._get_top_movers("losers", 10)
-        active = await self._get_most_active(10)
+        items = [
+            {
+                "date": p.date.isoformat() if hasattr(p.date, 'isoformat') else str(p.date),
+                "open": p.open, "high": p.high, "low": p.low, "close": p.close,
+                "volume": p.volume, "delivery_percentage": p.delivery_percentage,
+                "vwap": p.vwap,
+            }
+            for p in rows
+        ]
+
+        next_cursor = None
+        if has_more and rows:
+            last_date = rows[-1].date
+            next_cursor = encode_cursor(
+                last_date.isoformat() if hasattr(last_date, 'isoformat') else str(last_date)
+            )
+
+        return CursorPage(items=items, next_cursor=next_cursor, has_more=has_more)
+
+    @cached(ttl=30, skip_args=1)
+    async def get_market_overview(self, limit: int = 50) -> Dict:
+        indices = await self._get_all_index_data()
+        effective_limit = min(limit if limit > 0 else 500, 500)
+        gainers = await self._get_top_movers("gainers", effective_limit)
+        losers = await self._get_top_movers("losers", effective_limit)
+        active = await self._get_most_active(effective_limit)
 
         return {
-            "indices": {"nifty": nifty, "sensex": sensex, "banknifty": banknifty, "vix": vix},
+            "indices": indices,
             "gainers": gainers,
             "losers": losers,
             "most_active": active,
         }
 
-    async def _get_index_data(self, symbol: str) -> Optional[Dict]:
+    async def _get_all_index_data(self) -> Dict[str, Optional[Dict]]:
         result = await self.db.execute(
-            select(Stock).filter(Stock.symbol == symbol, Stock.is_index == True)
+            select(Stock).filter(Stock.is_index == True)
         )
-        stock = result.scalar_one_or_none()
-        if not stock:
-            return None
+        index_stocks = result.scalars().all()
+        if not index_stocks:
+            return {"nifty": None, "sensex": None, "banknifty": None, "vix": None}
 
-        prices = await self.get_stock_prices(str(stock.id), "1D", 2)
-        if len(prices) < 2:
-            return None
-
-        latest = prices[-1]
-        prev = prices[-2]
-        change = latest.close - prev.close
-        change_percent = (change / prev.close) * 100
-
-        return {
-            "symbol": symbol,
-            "current_value": latest.close,
-            "change": round(change, 2),
-            "change_percent": round(change_percent, 2),
-            "high": latest.high,
-            "low": latest.low,
-            "is_up": change >= 0,
-        }
+        indices = {}
+        for stock in index_stocks:
+            prices = await self.get_stock_prices(str(stock.id), "1D", 2)
+            if len(prices.items) >= 2:
+                p = prices.items
+                latest, prev = p[-1], p[-2]
+                change = latest["close"] - prev["close"]
+                change_percent = (change / prev["close"]) * 100 if prev["close"] else 0
+                indices[stock.symbol.lower()] = {
+                    "symbol": stock.symbol,
+                    "current_value": latest["close"],
+                    "change": round(change, 2),
+                    "change_percent": round(change_percent, 2),
+                    "high": latest["high"],
+                    "low": latest["low"],
+                    "is_up": change >= 0,
+                }
+            else:
+                indices[stock.symbol.lower()] = None
+        return indices
 
     async def _get_top_movers(self, movers_type: str, limit: int) -> List[Dict]:
         subq = (

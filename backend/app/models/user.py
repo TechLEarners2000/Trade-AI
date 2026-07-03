@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, JSON
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, JSON, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.models.base import BaseModel
@@ -22,6 +22,7 @@ class User(BaseModel):
     is_premium = Column(Boolean, default=False, nullable=False)
     preferences = Column(JSON, default=dict, nullable=True)
     last_login = Column(DateTime(timezone=True), nullable=True)
+    token_version = Column(Integer, default=0, nullable=False)
 
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
     login_history = relationship("LoginHistory", back_populates="user", cascade="all, delete-orphan")

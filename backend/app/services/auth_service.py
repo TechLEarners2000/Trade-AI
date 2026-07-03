@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.user import User, UserSession, LoginHistory
-from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
+from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token, revoke_token
 from app.schemas.user import UserCreate, UserLogin
 from fastapi import HTTPException, status
 from datetime import datetime, timezone, timedelta
@@ -27,7 +27,7 @@ class AuthService:
         await self.db.flush()
         await self.db.refresh(user)
 
-        tokens = self._generate_tokens(str(user.id))
+        tokens = self._generate_tokens(str(user.id), user.token_version)
         await self._log_login(user, "email", True)
         await self.db.commit()
 
@@ -49,7 +49,7 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
         user.last_login = datetime.now(timezone.utc)
-        tokens = self._generate_tokens(str(user.id))
+        tokens = self._generate_tokens(str(user.id), user.token_version)
         await self._log_login(user, "email", True, ip=ip)
         await self.db.commit()
 
@@ -83,7 +83,7 @@ class AuthService:
                 user.avatar_url = avatar_url
 
         user.last_login = datetime.now(timezone.utc)
-        tokens = self._generate_tokens(str(user.id))
+        tokens = self._generate_tokens(str(user.id), user.token_version)
         await self._log_login(user, "google", True)
         await self.db.commit()
 
@@ -99,8 +99,28 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
         user_id = payload.get("sub")
-        tokens = self._generate_tokens(user_id)
+        user = await self.get_user_by_id(user_id)
+        tokens = self._generate_tokens(user_id, user.token_version)
         return tokens
+
+    async def logout(self, token: str) -> None:
+        payload = decode_token(token)
+        if payload is None:
+            return
+        exp = payload.get("exp", 0)
+        now = datetime.now(timezone.utc).timestamp()
+        ttl = max(int(exp - now), 0)
+        if ttl > 0:
+            await revoke_token(token, ttl)
+
+    async def logout_all_sessions(self, user_id: str) -> None:
+        result = await self.db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        user.token_version = (user.token_version or 0) + 1
+        self.db.add(user)
+        await self.db.commit()
 
     async def get_user_by_id(self, user_id: str) -> User:
         result = await self.db.execute(select(User).where(User.id == user_id))
@@ -109,10 +129,10 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
         return user
 
-    def _generate_tokens(self, user_id: str) -> dict:
+    def _generate_tokens(self, user_id: str, token_version: int = 0) -> dict:
         return {
-            "access_token": create_access_token({"sub": user_id}),
-            "refresh_token": create_refresh_token({"sub": user_id}),
+            "access_token": create_access_token({"sub": user_id, "token_version": token_version}),
+            "refresh_token": create_refresh_token({"sub": user_id, "token_version": token_version}),
         }
 
     async def _log_login(self, user: User, login_type: str, success: bool, reason: Optional[str] = None, ip: Optional[str] = None):

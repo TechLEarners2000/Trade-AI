@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends
+from typing import Optional
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func, text
+from sqlalchemy import select, desc, func
 from app.core.database import get_db
 from app.services.stock_service import StockService
 from app.models.stock import Stock, StockPrice, StockNews, CorporateAction
@@ -9,36 +10,66 @@ router = APIRouter()
 
 
 @router.get("/overview")
-async def get_market_overview(db: AsyncSession = Depends(get_db)):
+async def get_market_overview(limit: int = Query(50), db: AsyncSession = Depends(get_db)):
     service = StockService(db)
-    return await service.get_market_overview()
+    return await service.get_market_overview(limit=limit)
 
 
 @router.get("/market-movers")
-async def get_market_movers(type: str = "gainers", limit: int = 10, db: AsyncSession = Depends(get_db)):
+async def get_market_movers(
+    type: str = "gainers",
+    limit: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
     service = StockService(db)
+    effective_limit = min(limit if limit is not None and limit > 0 else 500, 500)
     if type == "gainers":
-        return {"type": type, "data": await service._get_top_movers("gainers", limit)}
+        return {"type": type, "data": await service._get_top_movers("gainers", effective_limit)}
     elif type == "losers":
-        return {"type": type, "data": await service._get_top_movers("losers", limit)}
+        return {"type": type, "data": await service._get_top_movers("losers", effective_limit)}
     elif type == "active":
-        return {"type": type, "data": await service._get_most_active(limit)}
+        return {"type": type, "data": await service._get_most_active(effective_limit)}
     return {"type": type, "data": []}
 
 
 @router.get("/indices")
-async def get_indices(db: AsyncSession = Depends(get_db)):
+async def get_indices(
+    history_days: int = Query(30, ge=1, le=90),
+    db: AsyncSession = Depends(get_db),
+):
     service = StockService(db)
-    nifty = await service._get_index_data("NIFTY")
-    sensex = await service._get_index_data("SENSEX")
-    banknifty = await service._get_index_data("BANKNIFTY")
-    vix = await service._get_index_data("INDIAVIX")
-    return {"indices": [
-        {"name": "NIFTY", "data": nifty},
-        {"name": "SENSEX", "data": sensex},
-        {"name": "BANKNIFTY", "data": banknifty},
-        {"name": "INDIAVIX", "data": vix},
-    ]}
+    index_data = await service._get_all_index_data()
+
+    history = {}
+    for symbol in ["NIFTY", "SENSEX", "BANKNIFTY", "INDIAVIX"]:
+        stock_result = await db.execute(
+            select(Stock).filter(Stock.symbol == symbol, Stock.is_index == True)
+        )
+        stock = stock_result.scalar_one_or_none()
+        if not stock:
+            history[symbol] = []
+            continue
+        prices_page = await service.get_stock_prices(str(stock.id), "1D", history_days)
+        history[symbol] = [
+            {
+                "date": p.get("date", ""),
+                "open": p.get("open", 0),
+                "high": p.get("high", 0),
+                "low": p.get("low", 0),
+                "close": p.get("close", 0),
+            }
+            for p in prices_page.items
+        ]
+
+    indices_list = []
+    for symbol_key, name in [("nifty", "NIFTY"), ("sensex", "SENSEX"), ("banknifty", "BANKNIFTY"), ("vix", "INDIAVIX")]:
+        data = index_data.get(symbol_key)
+        indices_list.append({"name": name, "data": data})
+
+    return {
+        "indices": indices_list,
+        "history": history,
+    }
 
 
 @router.get("/news")
@@ -63,7 +94,7 @@ async def get_market_news(limit: int = 20, db: AsyncSession = Depends(get_db)):
                 "source": "TradeAI",
                 "published_at": str(stock.created_at),
             }
-            for stock in stocks[:10]
+            for stock in stocks
         ]
     return [
         {

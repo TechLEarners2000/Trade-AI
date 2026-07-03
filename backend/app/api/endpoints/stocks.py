@@ -14,11 +14,14 @@ router = APIRouter()
 async def search_stocks(
     query: str = Query(min_length=1),
     limit: int = 20,
+    cursor: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     service = StockService(db)
-    stocks = await service.search_stocks(query, limit)
-    return [{"id": str(s.id), "symbol": s.symbol, "company_name": s.company_name, "sector": s.sector} for s in stocks]
+    result = await service.search_stocks(query, limit, cursor)
+    if cursor:
+        return result.model_dump()
+    return result.items
 
 
 @router.get("/{symbol}")
@@ -63,24 +66,19 @@ async def get_stock_detail(symbol: str, db: AsyncSession = Depends(get_db)):
 @router.get("/{symbol}/prices")
 async def get_stock_prices(
     symbol: str,
-    interval: str = Query("1D", regex="^(1m|5m|15m|30m|1h|4h|1D|1W|1M)$"),
+    interval: str = Query("1D", pattern="^(1m|5m|15m|30m|1h|4h|1D|1W|1M)$"),
     limit: int = 100,
+    cursor: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     service = StockService(db)
     stock = await service.get_stock_by_symbol(symbol.upper())
     if not stock:
         return {"error": "Stock not found"}
-    prices = await service.get_stock_prices(str(stock.id), interval, limit)
-    return [
-        {
-            "date": p.date.isoformat() if hasattr(p.date, 'isoformat') else str(p.date),
-            "open": p.open, "high": p.high, "low": p.low, "close": p.close,
-            "volume": p.volume, "delivery_percentage": p.delivery_percentage,
-            "vwap": p.vwap,
-        }
-        for p in prices
-    ]
+    result = await service.get_stock_prices(str(stock.id), interval, limit, cursor)
+    if cursor:
+        return result.model_dump()
+    return result.items
 
 
 @router.get("/{symbol}/technical")
@@ -89,7 +87,8 @@ async def get_technical_indicators(symbol: str, db: AsyncSession = Depends(get_d
     stock = await service.get_stock_by_symbol(symbol.upper())
     if not stock:
         return {"error": "Stock not found"}
-    prices = await service.get_stock_prices(str(stock.id), "1D", 200)
+    prices_raw = await service.get_stock_prices(str(stock.id), "1D", 200)
+    prices = prices_raw.items
     if not prices:
         return {"error": "No price data"}
 
@@ -132,7 +131,8 @@ async def get_chart_patterns(symbol: str, db: AsyncSession = Depends(get_db)):
     stock = await service.get_stock_by_symbol(symbol.upper())
     if not stock:
         return {"error": "Stock not found"}
-    prices = await service.get_stock_prices(str(stock.id), "1D", 200)
+    prices_raw = await service.get_stock_prices(str(stock.id), "1D", 200)
+    prices = prices_raw.items
     if not prices:
         return {"error": "No price data"}
 

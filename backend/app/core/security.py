@@ -1,8 +1,10 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from app.core.config import settings
+from app.core.redis_client import get_redis
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -18,14 +20,14 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire, "type": "access"})
+    to_encode.update({"exp": expire, "type": "access", "jti": str(uuid.uuid4())})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
 def create_refresh_token(data: Dict[str, Any]) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire, "type": "refresh"})
+    to_encode.update({"exp": expire, "type": "refresh", "jti": str(uuid.uuid4())})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
@@ -42,3 +44,25 @@ def verify_token(token: str, expected_type: str = "access") -> Optional[Dict[str
     if payload is None or payload.get("type") != expected_type:
         return None
     return payload
+
+
+async def revoke_token(token: str, ttl_seconds: int) -> None:
+    payload = decode_token(token)
+    if payload is None:
+        return
+    jti = payload.get("jti")
+    if jti:
+        redis = await get_redis()
+        await redis.set(f"token_denylist:{jti}", "revoked", ex=ttl_seconds)
+
+
+async def is_token_revoked(token: str) -> bool:
+    payload = decode_token(token)
+    if payload is None:
+        return True
+    jti = payload.get("jti")
+    if not jti:
+        return False
+    redis = await get_redis()
+    result = await redis.get(f"token_denylist:{jti}")
+    return result is not None

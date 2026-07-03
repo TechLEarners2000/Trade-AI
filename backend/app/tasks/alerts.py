@@ -21,7 +21,13 @@ def publish_to_redis(channel: str, data: dict):
         pass
 
 
-@celery_app.task
+@celery_app.task(
+    autoretry_for=(Exception,),
+    max_retries=2,
+    retry_backoff=True,
+    retry_backoff_max=30,
+    retry_jitter=True,
+)
 def check_all_alerts():
     engine = get_sync_engine()
     triggered = 0

@@ -3,7 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
-from app.core.security import verify_token
+from app.core.security import verify_token, is_token_revoked
 from app.models.user import User
 from typing import Optional
 
@@ -21,6 +21,9 @@ async def get_current_user(
     if payload is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
+    if await is_token_revoked(credentials.credentials):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
+
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
@@ -30,6 +33,10 @@ async def get_current_user(
 
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    token_version = payload.get("token_version", 0)
+    if token_version < (user.token_version or 0):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired, please login again")
 
     return user
 
@@ -45,12 +52,24 @@ async def get_current_user_optional(
     if payload is None:
         return None
 
+    if await is_token_revoked(credentials.credentials):
+        return None
+
     user_id = payload.get("sub")
     if not user_id:
         return None
 
     result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
-    return result.scalar_one_or_none()
+    user = result.scalar_one_or_none()
+
+    if user is None:
+        return None
+
+    token_version = payload.get("token_version", 0)
+    if token_version < (user.token_version or 0):
+        return None
+
+    return user
 
 
 async def get_admin_user(

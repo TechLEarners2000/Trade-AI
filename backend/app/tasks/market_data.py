@@ -61,7 +61,14 @@ def fetch_one_stock(symbol_id, symbol):
         return None
 
 
-@celery_app.task(rate_limit="30/m")
+@celery_app.task(
+    rate_limit="30/m",
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 def fetch_live_prices():
     engine = get_sync_engine()
     stocks = []
@@ -115,7 +122,13 @@ def fetch_live_prices():
     return {"status": "ok", "stocks_updated": updated, "total_attempted": len(stocks), "successful": len(results)}
 
 
-@celery_app.task
+@celery_app.task(
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 def update_indices():
     engine = get_sync_engine()
     with Session(engine) as session:
@@ -141,7 +154,13 @@ def update_indices():
     return {"status": "ok", "indices": indices_data}
 
 
-@celery_app.task
+@celery_app.task(
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 def fetch_stock_fundamentals(symbol: str):
     try:
         yf_symbol = YFINANCE_MAP.get(symbol) or (symbol + YFINANCE_SUFFIX)
@@ -206,7 +225,13 @@ def fetch_stock_fundamentals(symbol: str):
         return {"status": "error", "symbol": symbol, "error": str(e)}
 
 
-@celery_app.task
+@celery_app.task(
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 def fetch_company_news(symbol: str):
     try:
         yf_symbol = YFINANCE_MAP.get(symbol) or (symbol + YFINANCE_SUFFIX)

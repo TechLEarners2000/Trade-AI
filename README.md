@@ -88,18 +88,28 @@ npm run dev
 
 ## Environment Variables
 
-Copy `.env` and configure:
+Copy `.env.example` to `.env` and configure. Required variables **must** be set or the app will fail to boot:
 
-| Variable | Description |
-|----------|-------------|
-| `POSTGRES_HOST` | PostgreSQL host |
-| `POSTGRES_DB` | Database name |
-| `POSTGRES_USER` | Database user |
-| `POSTGRES_PASSWORD` | Database password |
-| `REDIS_HOST` | Redis host |
-| `SECRET_KEY` | JWT secret key |
-| `OPENAI_API_KEY` | OpenAI API key (optional) |
-| `GEMINI_API_KEY` | Google Gemini API key (optional) |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SECRET_KEY` | **Yes** | — | JWT secret key (no default, app fails fast if missing) |
+| `POSTGRES_PASSWORD` | **Yes** | — | Database password (no default, app fails fast if missing) |
+| `POSTGRES_HOST` | No | `localhost` | PostgreSQL host |
+| `POSTGRES_DB` | No | `trade` | Database name |
+| `POSTGRES_USER` | No | `trade_user` | Database user |
+| `REDIS_HOST` | No | `localhost` | Redis host |
+| `ENVIRONMENT` | No | `production` | `development` or `production`; API docs are hidden in production |
+| `DEBUG` | No | `false` | Enable debug mode (SQL echo, verbose errors) |
+| `ALLOWED_HOSTS` | No | `localhost,127.0.0.1,tradeai.local` | Allowed hosts for TrustedHostMiddleware |
+| `CORS_ORIGINS` | No | `http://localhost:3000,http://localhost:5173` | Comma-separated allowed CORS origins |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `60` | JWT access token TTL |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | JWT refresh token TTL |
+| `RATE_LIMIT_GLOBAL` | No | `100/minute` | Default per-IP rate limit |
+| `RATE_LIMIT_LOGIN` | No | `5/minute` | Login endpoint rate limit per IP+email |
+| `RATE_LIMIT_REGISTER` | No | `3/minute` | Register endpoint rate limit per IP |
+| `OPENAI_API_KEY` | No | — | OpenAI API key (optional) |
+| `GEMINI_API_KEY` | No | — | Google Gemini API key (optional) |
+| `SENTRY_DSN` | No | — | Sentry DSN for error tracking (optional) |
 
 ## API Documentation
 

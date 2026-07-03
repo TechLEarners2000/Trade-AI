@@ -1,4 +1,5 @@
-import { createSlice, PayloadAction } from '@reduxjs/toolkit'
+import { createSlice, PayloadAction, createSelector } from '@reduxjs/toolkit'
+import type { RootState } from './index'
 
 export interface LivePrice {
   symbol: string
@@ -65,3 +66,15 @@ const marketSlice = createSlice({
 
 export const { setConnected, updatePrice, updateIndexData, updateIndices } = marketSlice.actions
 export default marketSlice.reducer
+
+const selectMarketState = (state: RootState) => state.market
+
+export const selectLivePrices = createSelector(
+  selectMarketState,
+  (market) => Object.values(market.prices).slice(0, 500),
+)
+
+export const selectConnected = createSelector(
+  selectMarketState,
+  (market) => market.connected,
+)

@@ -11,13 +11,13 @@ def _clean(val: Any) -> Any:
     return val
 
 
-def _to_series(prices: List[StockPrice]) -> pd.DataFrame:
+def _to_series(prices: List) -> pd.DataFrame:
     data = {
-        "open": [p.open for p in prices],
-        "high": [p.high for p in prices],
-        "low": [p.low for p in prices],
-        "close": [p.close for p in prices],
-        "volume": [p.volume for p in prices],
+        "open": [p["open"] if isinstance(p, dict) else p.open for p in prices],
+        "high": [p["high"] if isinstance(p, dict) else p.high for p in prices],
+        "low": [p["low"] if isinstance(p, dict) else p.low for p in prices],
+        "close": [p["close"] if isinstance(p, dict) else p.close for p in prices],
+        "volume": [p["volume"] if isinstance(p, dict) else p.volume for p in prices],
     }
     return pd.DataFrame(data)
 

@@ -1,16 +1,14 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { dashboardAPI } from '@/lib/api'
-import { formatPercent } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
+import { selectConnected, selectLivePrices } from '@/store/marketSlice'
 import { useWebSocket } from '@/hooks/useWebSocket'
-import {
-  TrendingUp, TrendingDown, BarChart3, PieChart, Activity,
-  Newspaper, ArrowUpRight, ArrowDownRight, LineChart, Zap,
-} from 'lucide-react'
+import { TrendingUp, TrendingDown, Activity, Zap } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import MarketIndicesChart from '@/components/dashboard/MarketIndicesChart'
 
 interface MarketData {
   indices: Record<string, { symbol: string; current_value: number; change: number; change_percent: number; high?: number; low?: number; is_up: boolean }>
@@ -29,35 +27,22 @@ const item = {
   show: { opacity: 1, y: 0 },
 }
 
-const indicesList = [
-  { key: 'nifty', label: 'NIFTY 50', icon: LineChart },
-  { key: 'sensex', label: 'SENSEX', icon: Activity },
-  { key: 'banknifty', label: 'BANK NIFTY', icon: BarChart3 },
-  { key: 'vix', label: 'INDIA VIX', icon: TrendingUp },
-]
-
 export default function Dashboard() {
   const navigate = useNavigate()
   const [data, setData] = useState<MarketData | null>(null)
   const [loading, setLoading] = useState(true)
-  const wsIndices = useAppSelector((s) => s.market.indices)
-  const wsConnected = useAppSelector((s) => s.market.connected)
-  const livePrices = useAppSelector((s) => Object.values(s.market.prices).slice(0, 10))
+  const wsConnected = useAppSelector(selectConnected)
+  const livePrices = useAppSelector(selectLivePrices)
   useWebSocket()
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const overview = await dashboardAPI.getOverview()
+        const overview = await dashboardAPI.getOverview(50)
         setData(overview.data)
       } catch {
         setData({
-          indices: {
-            nifty: { symbol: 'NIFTY', current_value: 24175.7, change: 156.78, change_percent: 0.71, high: 24200, low: 24000, is_up: true },
-            sensex: { symbol: 'SENSEX', current_value: 77502.12, change: 450.12, change_percent: 0.61, high: 77600, low: 77000, is_up: true },
-            banknifty: { symbol: 'BANKNIFTY', current_value: 58031.65, change: -123.45, change_percent: -0.26, high: 58400, low: 57800, is_up: false },
-            vix: { symbol: 'INDIAVIX', current_value: 12.29, change: -0.45, change_percent: -3.0, high: 13.0, low: 12.0, is_up: false },
-          },
+          indices: {},
           gainers: [],
           losers: [],
           most_active: [],
@@ -67,37 +52,6 @@ export default function Dashboard() {
     }
     fetchData()
   }, [])
-
-  const mergedIndices = useMemo(() => {
-    const base = data?.indices || {}
-    const result: Record<string, { symbol: string; current_value: number; change: number; change_percent: number; high?: number; low?: number; is_up: boolean }> = {}
-    for (const key of ['nifty', 'sensex', 'banknifty', 'vix']) {
-      const ws = wsIndices[key.toUpperCase()]
-      const rest = base[key]
-      if (ws && rest) {
-        result[key] = {
-          ...rest,
-          current_value: ws.current_value,
-          change: ws.change,
-          change_percent: ws.change_percent,
-          is_up: ws.is_up,
-        }
-      } else if (ws) {
-        result[key] = {
-          symbol: key.toUpperCase(),
-          current_value: ws.current_value,
-          change: ws.change,
-          change_percent: ws.change_percent,
-          high: ws.high,
-          low: ws.low,
-          is_up: ws.is_up,
-        }
-      } else if (rest) {
-        result[key] = rest
-      }
-    }
-    return result
-  }, [data, wsIndices])
 
   if (loading) {
     return (
@@ -138,40 +92,20 @@ export default function Dashboard() {
         </div>
       )}
 
-      <motion.div variants={item} className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {indicesList.map(({ key, label, icon: Icon }) => {
-          const index = mergedIndices[key]
-          if (!index) return null
-          return (
-            <Card key={key} className="stat-card cursor-pointer" onClick={() => navigate(`/stocks/${index.symbol}`)}>
-              <CardContent className="p-4 md:p-5">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-xs text-muted-foreground font-medium">{label}</span>
-                  <Icon className={`w-4 h-4 ${index.is_up ? 'text-green-500' : 'text-red-500'}`} />
-                </div>
-                <div className="text-xl md:text-2xl font-bold mb-1">
-                  {index.current_value?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                </div>
-                <div className={`flex items-center gap-1 text-sm ${index.is_up ? 'text-green-500' : 'text-red-500'}`}>
-                  {index.is_up ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
-                  <span>{formatPercent(index.change_percent)}</span>
-                </div>
-              </CardContent>
-            </Card>
-          )
-        })}
+      <motion.div variants={item}>
+        <MarketIndicesChart />
       </motion.div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <motion.div variants={item}>
-          <Card>
-            <CardHeader>
+          <Card className="relative">
+            <CardHeader className="sticky top-0 z-10 bg-card">
               <CardTitle className="text-lg flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-green-500" /> Top Gainers
               </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-2">
-              {(data?.gainers || []).slice(0, 5).map((g, i) => (
+            <CardContent className="space-y-2 max-h-[300px] overflow-y-auto">
+              {(data?.gainers || []).map((g, i) => (
                 <div
                   key={g.symbol}
                   className="flex items-center justify-between p-3 rounded-lg hover:bg-secondary/30 transition-colors cursor-pointer"
@@ -195,14 +129,14 @@ export default function Dashboard() {
         </motion.div>
 
         <motion.div variants={item}>
-          <Card>
-            <CardHeader>
+          <Card className="relative">
+            <CardHeader className="sticky top-0 z-10 bg-card">
               <CardTitle className="text-lg flex items-center gap-2">
                 <TrendingDown className="w-4 h-4 text-red-500" /> Top Losers
               </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-2">
-              {(data?.losers || []).slice(0, 5).map((l, i) => (
+            <CardContent className="space-y-2 max-h-[300px] overflow-y-auto">
+              {(data?.losers || []).map((l, i) => (
                 <div
                   key={l.symbol}
                   className="flex items-center justify-between p-3 rounded-lg hover:bg-secondary/30 transition-colors cursor-pointer"
@@ -227,15 +161,15 @@ export default function Dashboard() {
       </div>
 
       <motion.div variants={item}>
-        <Card>
-          <CardHeader>
+        <Card className="relative">
+          <CardHeader className="sticky top-0 z-10 bg-card">
             <CardTitle className="text-lg flex items-center gap-2">
               <Activity className="w-4 h-4" /> Most Active
             </CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="max-h-[300px] overflow-y-auto">
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {(data?.most_active || []).slice(0, 9).map((a) => (
+              {(data?.most_active || []).map((a) => (
                 <div
                   key={a.symbol}
                   className="flex items-center justify-between p-3 rounded-lg bg-secondary/30 hover:bg-secondary/50 transition-colors cursor-pointer"
