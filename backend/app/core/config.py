@@ -15,19 +15,23 @@ class Settings(BaseSettings):
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "trade"
     POSTGRES_USER: str = "trade_user"
-    POSTGRES_PASSWORD: str
+    POSTGRES_PASSWORD: Optional[str] = None
     DATABASE_URL: Optional[str] = None
 
     @property
     def db_url(self) -> str:
         if self.DATABASE_URL:
             return self.DATABASE_URL
+        if not self.POSTGRES_PASSWORD:
+            raise ValueError("Either DATABASE_URL or POSTGRES_PASSWORD must be set")
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
     @property
     def db_url_sync(self) -> str:
         if self.DATABASE_URL:
             return self.DATABASE_URL.replace("+asyncpg", "")
+        if not self.POSTGRES_PASSWORD:
+            raise ValueError("Either DATABASE_URL or POSTGRES_PASSWORD must be set")
         return f"postgresql+psycopg2://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
     REDIS_HOST: str = "localhost"
