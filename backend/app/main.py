@@ -6,7 +6,6 @@ import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from app.core.config import settings
@@ -98,11 +97,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
-)
-
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=settings.allowed_hosts_list,
 )
 
 
