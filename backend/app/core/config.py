@@ -68,7 +68,7 @@ class Settings(BaseSettings):
 
     SENTRY_DSN: Optional[str] = None
 
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,https://trade-ai-blond.vercel.app"
     ALLOWED_HOSTS: str = "localhost,127.0.0.1,backend,tradeai.local,test,testserver,test.local,.onrender.com,.vercel.app"
 
     @property
