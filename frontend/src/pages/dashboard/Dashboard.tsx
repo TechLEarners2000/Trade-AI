@@ -1,13 +1,15 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
+import { useQuery } from '@tanstack/react-query'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { dashboardAPI } from '@/lib/api'
+import { dashboardAPI, advisorAPI } from '@/lib/api'
 import { useAppSelector } from '@/store/hooks'
 import { selectConnected, selectLivePrices } from '@/store/marketSlice'
 import { useWebSocket } from '@/hooks/useWebSocket'
-import { TrendingUp, TrendingDown, Activity, Zap } from 'lucide-react'
+import { TrendingUp, TrendingDown, Activity, Zap, Sparkles } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip } from 'recharts'
 import MarketIndicesChart from '@/components/dashboard/MarketIndicesChart'
 
 interface MarketData {
@@ -96,6 +98,8 @@ export default function Dashboard() {
         <MarketIndicesChart />
       </motion.div>
 
+      <AdvisorPreviewCard topGainerSymbol={data?.gainers?.[0]?.symbol} />
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <motion.div variants={item}>
           <Card className="relative">
@@ -118,7 +122,9 @@ export default function Dashboard() {
                       <div className="text-xs text-muted-foreground">₹{g.price?.toFixed(2) || 'N/A'}</div>
                     </div>
                   </div>
-                  <Badge variant="success">+{Math.abs(g.change_percent)?.toFixed(2) || '0'}%</Badge>
+                  <Badge variant={g.change_percent >= 0 ? 'success' : 'destructive'}>
+                    {g.change_percent >= 0 ? '+' : ''}{g.change_percent?.toFixed(2) || '0'}%
+                  </Badge>
                 </div>
               ))}
               {(!data?.gainers || data.gainers.length === 0) && (
@@ -149,7 +155,9 @@ export default function Dashboard() {
                       <div className="text-xs text-muted-foreground">₹{l.price?.toFixed(2) || 'N/A'}</div>
                     </div>
                   </div>
-                  <Badge variant="destructive">-{Math.abs(l.change_percent)?.toFixed(2) || '0'}%</Badge>
+                  <Badge variant={l.change_percent >= 0 ? 'success' : 'destructive'}>
+                    {l.change_percent >= 0 ? '+' : ''}{l.change_percent?.toFixed(2) || '0'}%
+                  </Badge>
                 </div>
               ))}
               {(!data?.losers || data.losers.length === 0) && (
@@ -189,6 +197,76 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </motion.div>
+    </motion.div>
+  )
+}
+
+function AdvisorPreviewCard({ topGainerSymbol }: { topGainerSymbol?: string }) {
+  const navigate = useNavigate()
+  const { data: analysis } = useQuery({
+    queryKey: ['advisor-preview', topGainerSymbol],
+    queryFn: async () => {
+      const { data } = await advisorAPI.analyze(topGainerSymbol!)
+      return data as { history: { date: string; close: number }[]; current_price: number; change_percent: number; recommendation: string }
+    },
+    enabled: !!topGainerSymbol,
+  })
+
+  if (!analysis || !analysis.history || analysis.history.length === 0) return null
+
+  const chartData = analysis.history.slice(-14).map((h) => ({
+    date: h.date.slice(0, 10),
+    close: h.close,
+  }))
+
+  return (
+    <motion.div variants={{ hidden: { opacity: 0, y: 20 }, show: { opacity: 1, y: 0 } }}>
+      <Card className="cursor-pointer hover:bg-secondary/10 transition-colors" onClick={() => navigate('/advisor')}>
+        <CardHeader className="flex flex-row items-center justify-between pb-2">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-primary" />
+            {topGainerSymbol} — Trend Preview
+          </CardTitle>
+          <span className="text-xs text-muted-foreground">Click for full Advisor →</span>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-4 mb-3">
+            <div>
+              <span className="text-xs text-muted-foreground">Price</span>
+              <div className="text-lg font-bold">₹{analysis.current_price.toFixed(2)}</div>
+            </div>
+            <div>
+              <span className="text-xs text-muted-foreground">Change</span>
+              <div className={`text-lg font-bold ${analysis.change_percent >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                {analysis.change_percent >= 0 ? '+' : ''}{analysis.change_percent.toFixed(2)}%
+              </div>
+            </div>
+          </div>
+          <div className="h-[120px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData}>
+                <XAxis dataKey="date" hide />
+                <YAxis domain={['auto', 'auto']} hide />
+                <Tooltip
+                  contentStyle={{
+                    background: 'hsl(var(--card))',
+                    border: '1px solid hsl(var(--border))',
+                    borderRadius: '8px',
+                    fontSize: '11px',
+                  }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="close"
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={2}
+                  dot={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </CardContent>
+      </Card>
     </motion.div>
   )
 }

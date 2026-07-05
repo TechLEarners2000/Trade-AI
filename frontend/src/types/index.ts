@@ -153,3 +153,53 @@ export interface BacktestResult {
   profit_factor?: number
   total_trades?: number
 }
+
+export interface RankedStock {
+  symbol: string
+  company_name: string
+  price: number
+  change_percent: number
+  recommendation: string
+  signal_strength: number
+}
+
+export interface StockAnalysis {
+  symbol: string
+  company_name: string
+  history: { date: string; close: number }[]
+  prediction: { date: string; predicted_close: number }[]
+  current_price: number
+  change_percent: number
+  recommendation: string
+  signal_strength: number
+  rationale: string
+  confidence: string
+  rsi?: number
+}
+
+export interface InvestmentSuggestion {
+  symbol: string
+  company_name: string
+  price: number
+  suggested_qty: number
+  allocated_amount: number
+  signal_strength: number
+  rationale: string
+}
+
+export interface InvestResult {
+  suggestions: InvestmentSuggestion[]
+  unallocated_amount: number
+}
+
+export interface SellCheckResult {
+  symbol: string
+  current_price: number
+  buy_price: number
+  quantity: number
+  pnl: number
+  pnl_percent: number
+  sell_recommendation: string
+  recommendation: string
+  rationale: string
+}

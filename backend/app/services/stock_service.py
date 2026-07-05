@@ -157,7 +157,7 @@ class StockService:
                 indices[stock.symbol.lower()] = None
         return indices
 
-    async def _get_top_movers(self, movers_type: str, limit: int) -> List[Dict]:
+    async def _get_top_movers(self, movers_type: str, limit: int, sector: Optional[str] = None) -> List[Dict]:
         subq = (
             select(
                 StockPrice.stock_id,
@@ -198,6 +198,14 @@ class StockService:
         )
         change_expr = (pairs.c.latest_close - pairs.c.prev_close) / pairs.c.prev_close * 100
         order = change_expr.desc() if movers_type == "gainers" else change_expr.asc()
+        filters = [
+            Stock.is_active == True,
+            Stock.is_index == False,
+            pairs.c.latest_close.isnot(None),
+            pairs.c.prev_close.isnot(None),
+        ]
+        if sector:
+            filters.append(Stock.sector.ilike(f"%{sector}%"))
         stmt = (
             select(
                 Stock.symbol,
@@ -207,12 +215,7 @@ class StockService:
                 change_expr.label("change_percent"),
             )
             .join(pairs, Stock.id == pairs.c.stock_id)
-            .filter(
-                Stock.is_active == True,
-                Stock.is_index == False,
-                pairs.c.latest_close.isnot(None),
-                pairs.c.prev_close.isnot(None),
-            )
+            .filter(*filters)
             .order_by(order)
             .limit(limit)
         )

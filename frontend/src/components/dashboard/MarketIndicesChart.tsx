@@ -101,15 +101,7 @@ export default function MarketIndicesChart() {
     })
   }, [history, mode])
 
-  if (loading) {
-    return (
-      <Card>
-        <CardContent className="p-6 flex items-center justify-center h-48">
-          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" />
-        </CardContent>
-      </Card>
-    )
-  }
+  const noChartData = !loading && chartData.length === 0
 
   return (
     <Card>
@@ -158,55 +150,69 @@ export default function MarketIndicesChart() {
           })}
         </div>
 
-        <div className="h-[300px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
-              <XAxis
-                dataKey="date"
-                tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
-                tickLine={false}
-                axisLine={false}
-              />
-              <YAxis
-                tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
-                tickLine={false}
-                axisLine={false}
-                tickFormatter={(v: number) => mode === 'percent' ? `${v}%` : v.toLocaleString('en-IN')}
-                width={mode === 'percent' ? 45 : 70}
-              />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: 'hsl(var(--card))',
-                  border: '1px solid hsl(var(--border))',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                }}
-                formatter={(value: number, name: string) => {
-                  const cfg = INDEX_CONFIG[name]
-                  const label = cfg?.label || name
-                  if (mode === 'percent') return [`${value.toFixed(2)}%`, label]
-                  return [value.toLocaleString('en-IN', { minimumFractionDigits: 2 }), label]
-                }}
-                labelFormatter={(label: string) => label}
-              />
-              <Legend
-                formatter={(value: string) => INDEX_CONFIG[value]?.label || value}
-                wrapperStyle={{ fontSize: '11px' }}
-              />
-              {KEYS.map((key) => (
-                <Line
-                  key={key}
-                  type="monotone"
-                  dataKey={key}
-                  stroke={INDEX_CONFIG[key].color}
-                  strokeWidth={2}
-                  dot={false}
-                  activeDot={{ r: 4 }}
+        {loading && (
+          <div className="h-[300px] flex items-center justify-center">
+            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" />
+          </div>
+        )}
+
+        {noChartData && !loading && (
+          <div className="h-[300px] flex items-center justify-center text-sm text-muted-foreground">
+            No chart data available
+          </div>
+        )}
+
+        {!loading && !noChartData && (
+          <div className="h-[300px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+                  tickLine={false}
+                  axisLine={false}
                 />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+                <YAxis
+                  tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+                  tickLine={false}
+                  axisLine={false}
+                  tickFormatter={(v: number) => mode === 'percent' ? `${v}%` : v.toLocaleString('en-IN')}
+                  width={mode === 'percent' ? 45 : 70}
+                />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: 'hsl(var(--card))',
+                    border: '1px solid hsl(var(--border))',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                  }}
+                  formatter={(value: number, name: string) => {
+                    const cfg = INDEX_CONFIG[name]
+                    const label = cfg?.label || name
+                    if (mode === 'percent') return [`${value.toFixed(2)}%`, label]
+                    return [value.toLocaleString('en-IN', { minimumFractionDigits: 2 }), label]
+                  }}
+                  labelFormatter={(label: string) => label}
+                />
+                <Legend
+                  formatter={(value: string) => INDEX_CONFIG[value]?.label || value}
+                  wrapperStyle={{ fontSize: '11px' }}
+                />
+                {KEYS.map((key) => (
+                  <Line
+                    key={key}
+                    type="monotone"
+                    dataKey={key}
+                    stroke={INDEX_CONFIG[key].color}
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 4 }}
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

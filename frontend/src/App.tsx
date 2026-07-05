@@ -24,6 +24,9 @@ import AIInsights from '@/pages/ai/AIInsights'
 import News from '@/pages/news/News'
 import Learning from '@/pages/learning/Learning'
 import Admin from '@/pages/admin/Admin'
+import Advisor from '@/pages/advisor/Advisor'
+import FAQ from '@/pages/faq/FAQ'
+import Movers from '@/pages/movers/Movers'
 
 const queryClient = new QueryClient()
 
@@ -80,6 +83,7 @@ export default function App() {
             }>
               <Route index element={<Navigate to="/dashboard" replace />} />
               <Route path="dashboard" element={<Dashboard />} />
+              <Route path="advisor" element={<Advisor />} />
               <Route path="stocks" element={<Stocks />} />
               <Route path="stocks/:symbol" element={<StockDetail />} />
               <Route path="charts" element={<Charts />} />
@@ -91,7 +95,9 @@ export default function App() {
               <Route path="alerts" element={<Alerts />} />
               <Route path="ai-insights" element={<AIInsights />} />
               <Route path="news" element={<News />} />
+              <Route path="movers" element={<Movers />} />
               <Route path="learn" element={<Learning />} />
+              <Route path="faq" element={<FAQ />} />
               <Route path="admin" element={
                 <AdminRoute>
                   <Admin />

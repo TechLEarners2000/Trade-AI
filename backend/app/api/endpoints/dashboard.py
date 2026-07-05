@@ -19,14 +19,15 @@ async def get_market_overview(limit: int = Query(50), db: AsyncSession = Depends
 async def get_market_movers(
     type: str = "gainers",
     limit: Optional[int] = Query(None),
+    sector: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     service = StockService(db)
     effective_limit = min(limit if limit is not None and limit > 0 else 500, 500)
     if type == "gainers":
-        return {"type": type, "data": await service._get_top_movers("gainers", effective_limit)}
+        return {"type": type, "data": await service._get_top_movers("gainers", effective_limit, sector)}
     elif type == "losers":
-        return {"type": type, "data": await service._get_top_movers("losers", effective_limit)}
+        return {"type": type, "data": await service._get_top_movers("losers", effective_limit, sector)}
     elif type == "active":
         return {"type": type, "data": await service._get_most_active(effective_limit)}
     return {"type": type, "data": []}

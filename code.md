@@ -90,18 +90,28 @@ npm run dev
 
 ## Environment Variables
 
-Copy `.env` and configure:
+Copy `.env.example` to `.env` and configure. Required variables **must** be set or the app will fail to boot:
 
-| Variable | Description |
-|----------|-------------|
-| `POSTGRES_HOST` | PostgreSQL host |
-| `POSTGRES_DB` | Database name |
-| `POSTGRES_USER` | Database user |
-| `POSTGRES_PASSWORD` | Database password |
-| `REDIS_HOST` | Redis host |
-| `SECRET_KEY` | JWT secret key |
-| `OPENAI_API_KEY` | OpenAI API key (optional) |
-| `GEMINI_API_KEY` | Google Gemini API key (optional) |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SECRET_KEY` | **Yes** | — | JWT secret key (no default, app fails fast if missing) |
+| `POSTGRES_PASSWORD` | **Yes** | — | Database password (no default, app fails fast if missing) |
+| `POSTGRES_HOST` | No | `localhost` | PostgreSQL host |
+| `POSTGRES_DB` | No | `trade` | Database name |
+| `POSTGRES_USER` | No | `trade_user` | Database user |
+| `REDIS_HOST` | No | `localhost` | Redis host |
+| `ENVIRONMENT` | No | `production` | `development` or `production`; API docs are hidden in production |
+| `DEBUG` | No | `false` | Enable debug mode (SQL echo, verbose errors) |
+| `ALLOWED_HOSTS` | No | `localhost,127.0.0.1,tradeai.local` | Allowed hosts for TrustedHostMiddleware |
+| `CORS_ORIGINS` | No | `http://localhost:3000,http://localhost:5173` | Comma-separated allowed CORS origins |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `60` | JWT access token TTL |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | JWT refresh token TTL |
+| `RATE_LIMIT_GLOBAL` | No | `100/minute` | Default per-IP rate limit |
+| `RATE_LIMIT_LOGIN` | No | `5/minute` | Login endpoint rate limit per IP+email |
+| `RATE_LIMIT_REGISTER` | No | `3/minute` | Register endpoint rate limit per IP |
+| `OPENAI_API_KEY` | No | — | OpenAI API key (optional) |
+| `GEMINI_API_KEY` | No | — | Google Gemini API key (optional) |
+| `SENTRY_DSN` | No | — | Sentry DSN for error tracking (optional) |
 
 ## API Documentation
 
@@ -304,7 +314,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
-from app.core.security import verify_token
+from app.core.security import verify_token, is_token_revoked
 from app.models.user import User
 from typing import Optional
 
@@ -322,6 +332,9 @@ async def get_current_user(
     if payload is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
+    if await is_token_revoked(credentials.credentials):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
+
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
@@ -331,6 +344,10 @@ async def get_current_user(
 
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    token_version = payload.get("token_version", 0)
+    if token_version < (user.token_version or 0):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired, please login again")
 
     return user
 
@@ -346,12 +363,24 @@ async def get_current_user_optional(
     if payload is None:
         return None
 
+    if await is_token_revoked(credentials.credentials):
+        return None
+
     user_id = payload.get("sub")
     if not user_id:
         return None
 
     result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
-    return result.scalar_one_or_none()
+    user = result.scalar_one_or_none()
+
+    if user is None:
+        return None
+
+    token_version = payload.get("token_version", 0)
+    if token_version < (user.token_version or 0):
+        return None
+
+    return user
 
 
 async def get_admin_user(
@@ -695,14 +724,19 @@ from app.schemas.user import (
 )
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.core.security import hash_password
+from app.core.security import hash_password, decode_token
 from sqlalchemy import select
+from slowapi.util import get_remote_address
+from slowapi import Limiter
+from app.core.config import settings
 
+limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
 
 
 @router.post("/register", response_model=TokenResponse)
-async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
+@limiter.limit(settings.RATE_LIMIT_REGISTER)
+async def register(data: UserCreate, request: Request, db: AsyncSession = Depends(get_db)):
     service = AuthService(db)
     result = await service.register(data)
     return {
@@ -714,6 +748,7 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit(settings.RATE_LIMIT_LOGIN)
 async def login(data: UserLogin, request: Request, db: AsyncSession = Depends(get_db)):
     service = AuthService(db)
     result = await service.login(data, request.client.host)
@@ -723,6 +758,22 @@ async def login(data: UserLogin, request: Request, db: AsyncSession = Depends(ge
         "token_type": "bearer",
         "user": UserResponse.model_validate(result["user"]),
     }
+
+
+@router.post("/logout")
+async def logout(request: Request, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "")
+    service = AuthService(db)
+    await service.logout(token)
+    return {"message": "Logged out successfully"}
+
+
+@router.post("/logout-all")
+async def logout_all(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    service = AuthService(db)
+    await service.logout_all_sessions(str(current_user.id))
+    return {"message": "All sessions logged out successfully"}
 
 
 @router.post("/google", response_model=TokenResponse)
@@ -928,10 +979,7 @@ async def get_indices(
     db: AsyncSession = Depends(get_db),
 ):
     service = StockService(db)
-    nifty = await service._get_index_data("NIFTY")
-    sensex = await service._get_index_data("SENSEX")
-    banknifty = await service._get_index_data("BANKNIFTY")
-    vix = await service._get_index_data("INDIAVIX")
+    index_data = await service._get_all_index_data()
 
     history = {}
     for symbol in ["NIFTY", "SENSEX", "BANKNIFTY", "INDIAVIX"]:
@@ -942,25 +990,25 @@ async def get_indices(
         if not stock:
             history[symbol] = []
             continue
-        prices = await service.get_stock_prices(str(stock.id), "1D", history_days)
+        prices_page = await service.get_stock_prices(str(stock.id), "1D", history_days)
         history[symbol] = [
             {
-                "date": p.date.isoformat() if hasattr(p.date, "isoformat") else str(p.date),
-                "open": p.open,
-                "high": p.high,
-                "low": p.low,
-                "close": p.close,
+                "date": p.get("date", ""),
+                "open": p.get("open", 0),
+                "high": p.get("high", 0),
+                "low": p.get("low", 0),
+                "close": p.get("close", 0),
             }
-            for p in prices
+            for p in prices_page.items
         ]
 
+    indices_list = []
+    for symbol_key, name in [("nifty", "NIFTY"), ("sensex", "SENSEX"), ("banknifty", "BANKNIFTY"), ("vix", "INDIAVIX")]:
+        data = index_data.get(symbol_key)
+        indices_list.append({"name": name, "data": data})
+
     return {
-        "indices": [
-            {"name": "NIFTY", "data": nifty},
-            {"name": "SENSEX", "data": sensex},
-            {"name": "BANKNIFTY", "data": banknifty},
-            {"name": "INDIAVIX", "data": vix},
-        ],
+        "indices": indices_list,
         "history": history,
     }
 
@@ -1404,11 +1452,14 @@ router = APIRouter()
 async def search_stocks(
     query: str = Query(min_length=1),
     limit: int = 20,
+    cursor: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     service = StockService(db)
-    stocks = await service.search_stocks(query, limit)
-    return [{"id": str(s.id), "symbol": s.symbol, "company_name": s.company_name, "sector": s.sector} for s in stocks]
+    result = await service.search_stocks(query, limit, cursor)
+    if cursor:
+        return result.model_dump()
+    return result.items
 
 
 @router.get("/{symbol}")
@@ -1453,24 +1504,19 @@ async def get_stock_detail(symbol: str, db: AsyncSession = Depends(get_db)):
 @router.get("/{symbol}/prices")
 async def get_stock_prices(
     symbol: str,
-    interval: str = Query("1D", regex="^(1m|5m|15m|30m|1h|4h|1D|1W|1M)$"),
+    interval: str = Query("1D", pattern="^(1m|5m|15m|30m|1h|4h|1D|1W|1M)$"),
     limit: int = 100,
+    cursor: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     service = StockService(db)
     stock = await service.get_stock_by_symbol(symbol.upper())
     if not stock:
         return {"error": "Stock not found"}
-    prices = await service.get_stock_prices(str(stock.id), interval, limit)
-    return [
-        {
-            "date": p.date.isoformat() if hasattr(p.date, 'isoformat') else str(p.date),
-            "open": p.open, "high": p.high, "low": p.low, "close": p.close,
-            "volume": p.volume, "delivery_percentage": p.delivery_percentage,
-            "vwap": p.vwap,
-        }
-        for p in prices
-    ]
+    result = await service.get_stock_prices(str(stock.id), interval, limit, cursor)
+    if cursor:
+        return result.model_dump()
+    return result.items
 
 
 @router.get("/{symbol}/technical")
@@ -1479,7 +1525,8 @@ async def get_technical_indicators(symbol: str, db: AsyncSession = Depends(get_d
     stock = await service.get_stock_by_symbol(symbol.upper())
     if not stock:
         return {"error": "Stock not found"}
-    prices = await service.get_stock_prices(str(stock.id), "1D", 200)
+    prices_raw = await service.get_stock_prices(str(stock.id), "1D", 200)
+    prices = prices_raw.items
     if not prices:
         return {"error": "No price data"}
 
@@ -1522,7 +1569,8 @@ async def get_chart_patterns(symbol: str, db: AsyncSession = Depends(get_db)):
     stock = await service.get_stock_by_symbol(symbol.upper())
     if not stock:
         return {"error": "Stock not found"}
-    prices = await service.get_stock_prices(str(stock.id), "1D", 200)
+    prices_raw = await service.get_stock_prices(str(stock.id), "1D", 200)
+    prices = prices_raw.items
     if not prices:
         return {"error": "No price data"}
 
@@ -1691,7 +1739,6 @@ async def user_websocket(websocket: WebSocket):
 ``` py
 from pydantic_settings import BaseSettings
 from typing import Optional
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -1700,13 +1747,14 @@ load_dotenv()
 class Settings(BaseSettings):
     APP_NAME: str = "TradeAI - Stock Market Analytics"
     VERSION: str = "1.0.0"
-    DEBUG: bool = True
+    DEBUG: bool = False
+    ENVIRONMENT: str = "production"
 
-    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "localhost")
-    POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
-    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "trade")
-    POSTGRES_USER: str = os.getenv("POSTGRES_USER", "trade_user")
-    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "trade_pass_123")
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_DB: str = "trade"
+    POSTGRES_USER: str = "trade_user"
+    POSTGRES_PASSWORD: str
     DATABASE_URL: Optional[str] = None
 
     @property
@@ -1721,43 +1769,52 @@ class Settings(BaseSettings):
             return self.DATABASE_URL.replace("+asyncpg", "")
         return f"postgresql+psycopg2://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
-    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
-    REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
 
     @property
     def redis_url(self) -> str:
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "super-secret-key-change-in-production-123456")
+    SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    GOOGLE_CLIENT_ID: Optional[str] = os.getenv("GOOGLE_CLIENT_ID")
-    GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET")
+    GOOGLE_CLIENT_ID: Optional[str] = None
+    GOOGLE_CLIENT_SECRET: Optional[str] = None
 
-    OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
-    GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
+    OPENAI_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
 
-    FIREBASE_CREDENTIALS: Optional[str] = os.getenv("FIREBASE_CREDENTIALS")
+    FIREBASE_CREDENTIALS: Optional[str] = None
 
-    AWS_ACCESS_KEY_ID: Optional[str] = os.getenv("AWS_ACCESS_KEY_ID")
-    AWS_SECRET_ACCESS_KEY: Optional[str] = os.getenv("AWS_SECRET_ACCESS_KEY")
-    AWS_BUCKET_NAME: Optional[str] = os.getenv("AWS_BUCKET_NAME")
-    AWS_ENDPOINT_URL: Optional[str] = os.getenv("AWS_ENDPOINT_URL")
-    AWS_REGION: str = os.getenv("AWS_REGION", "ap-south-1")
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    AWS_BUCKET_NAME: Optional[str] = None
+    AWS_ENDPOINT_URL: Optional[str] = None
+    AWS_REGION: str = "ap-south-1"
 
-    SENTRY_DSN: Optional[str] = os.getenv("SENTRY_DSN")
+    SENTRY_DSN: Optional[str] = None
 
-    CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173")
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
+    ALLOWED_HOSTS: str = "localhost,127.0.0.1,backend,tradeai.local,test,testserver,test.local"
 
     @property
     def cors_origins_list(self) -> list:
         return [o.strip() for o in self.CORS_ORIGINS.split(",")]
 
+    @property
+    def allowed_hosts_list(self) -> list:
+        return [h.strip() for h in self.ALLOWED_HOSTS.split(",")]
+
     CELERY_BROKER_URL: Optional[str] = None
     CELERY_RESULT_BACKEND: Optional[str] = None
+
+    RATE_LIMIT_GLOBAL: str = "100/minute"
+    RATE_LIMIT_LOGIN: str = "5/minute"
+    RATE_LIMIT_REGISTER: str = "3/minute"
 
     @property
     def celery_broker(self) -> str:
@@ -1770,6 +1827,10 @@ class Settings(BaseSettings):
         if self.CELERY_RESULT_BACKEND:
             return self.CELERY_RESULT_BACKEND
         return self.redis_url
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT.lower() == "production"
 
 
 settings = Settings()
@@ -1784,19 +1845,40 @@ from sqlalchemy.orm import DeclarativeBase
 from typing import AsyncGenerator
 from app.core.config import settings
 
-engine = create_async_engine(
-    settings.db_url,
-    echo=settings.DEBUG,
-    pool_size=20,
-    max_overflow=10,
-    pool_pre_ping=True,
-)
+_engine = None
+_async_session = None
 
-async_session = async_sessionmaker(
-    engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-)
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        _engine = create_async_engine(
+            settings.db_url,
+            echo=settings.DEBUG,
+            pool_size=20,
+            max_overflow=10,
+            pool_pre_ping=True,
+        )
+    return _engine
+
+
+def get_async_session():
+    global _async_session
+    if _async_session is None:
+        _async_session = async_sessionmaker(
+            get_engine(),
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+    return _async_session
+
+
+def __getattr__(name):
+    if name == "engine":
+        return get_engine()
+    if name == "async_session":
+        return get_async_session()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class Base(DeclarativeBase):
@@ -1804,7 +1886,7 @@ class Base(DeclarativeBase):
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with async_session() as session:
+    async with get_async_session()() as session:
         try:
             yield session
             await session.commit()
@@ -1816,14 +1898,50 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db():
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+```
+
+
+### `backend/app/core/pagination.py`
+``` py
+import base64
+import json
+from typing import Optional, List, TypeVar, Generic
+from pydantic import BaseModel
+
+T = TypeVar("T")
+
+
+def encode_cursor(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode()).decode()
+
+
+def decode_cursor(cursor: str) -> Optional[str]:
+    if not cursor:
+        return None
+    try:
+        return base64.urlsafe_b64decode(cursor.encode()).decode()
+    except Exception:
+        return None
+
+
+class CursorPage(BaseModel, Generic[T]):
+    items: List[T]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
+    total: Optional[int] = None
 
 ```
 
 
 ### `backend/app/core/redis_client.py`
 ``` py
+import json
+import functools
+import hashlib
+from typing import Optional, Callable
 from redis.asyncio import Redis
 from app.core.config import settings
 
@@ -1851,7 +1969,7 @@ async def cache_get(key: str) -> str | None:
 
 async def cache_set(key: str, value: str, ttl: int = 300):
     r = await get_redis()
-    await r.setex(key, ttl, value)
+    await r.set(key, value, ex=ttl)
 
 
 async def cache_delete(key: str):
@@ -1868,16 +1986,48 @@ async def cache_incr(key: str, amount: int = 1) -> int:
     r = await get_redis()
     return await r.incr(key, amount)
 
+
+def _make_cache_key(prefix: str, args: tuple, kwargs: dict, skip_args: int = 0) -> str:
+    parts = [prefix]
+    for a in args[skip_args:]:
+        parts.append(str(a))
+    for k, v in sorted(kwargs.items()):
+        if k == "db":
+            continue
+        parts.append(f"{k}={v}")
+    raw = ":".join(parts)
+    if len(raw) > 200:
+        raw = hashlib.sha256(raw.encode()).hexdigest()
+    return raw
+
+
+def cached(ttl: int = 300, key_prefix: str = "", skip_args: int = 0):
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            prefix = key_prefix or f"{func.__module__}.{func.__qualname__}"
+            cache_key = _make_cache_key(prefix, args, kwargs, skip_args)
+            cached_val = await cache_get(cache_key)
+            if cached_val is not None:
+                return json.loads(cached_val)
+            result = await func(*args, **kwargs)
+            await cache_set(cache_key, json.dumps(result, default=str), ttl)
+            return result
+        return wrapper
+    return decorator
+
 ```
 
 
 ### `backend/app/core/security.py`
 ``` py
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from app.core.config import settings
+from app.core.redis_client import get_redis
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -1893,14 +2043,14 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire, "type": "access"})
+    to_encode.update({"exp": expire, "type": "access", "jti": str(uuid.uuid4())})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
 def create_refresh_token(data: Dict[str, Any]) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire, "type": "refresh"})
+    to_encode.update({"exp": expire, "type": "refresh", "jti": str(uuid.uuid4())})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
@@ -1918,19 +2068,88 @@ def verify_token(token: str, expected_type: str = "access") -> Optional[Dict[str
         return None
     return payload
 
+
+async def revoke_token(token: str, ttl_seconds: int) -> None:
+    payload = decode_token(token)
+    if payload is None:
+        return
+    jti = payload.get("jti")
+    if jti:
+        redis = await get_redis()
+        await redis.set(f"token_denylist:{jti}", "revoked", ex=ttl_seconds)
+
+
+async def is_token_revoked(token: str) -> bool:
+    payload = decode_token(token)
+    if payload is None:
+        return True
+    jti = payload.get("jti")
+    if not jti:
+        return False
+    redis = await get_redis()
+    result = await redis.get(f"token_denylist:{jti}")
+    return result is not None
+
 ```
 
 
 ### `backend/app/main.py`
 ``` py
-from fastapi import FastAPI
+import logging
+import time
+import uuid
+import traceback
+import json
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from contextlib import asynccontextmanager
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from app.core.config import settings
-from app.core.database import init_db
-from app.core.redis_client import close_redis
+from app.core.database import init_db, engine
+from app.core.redis_client import close_redis, get_redis
 from app.api.endpoints import router as api_router
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address, default_limits=[settings.RATE_LIMIT_GLOBAL])
+
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        if hasattr(record, "request_id"):
+            log_entry["request_id"] = record.request_id
+        if hasattr(record, "user_id"):
+            log_entry["user_id"] = record.user_id
+        if hasattr(record, "route"):
+            log_entry["route"] = record.route
+        if hasattr(record, "latency_ms"):
+            log_entry["latency_ms"] = record.latency_ms
+        if record.exc_info and record.exc_info[0]:
+            log_entry["exception"] = traceback.format_exception(*record.exc_info)
+        return json.dumps(log_entry)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger("tradeai")
+
+if settings.SENTRY_DSN:
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.ENVIRONMENT,
+        traces_sample_rate=0.2,
+    )
 
 
 @asynccontextmanager
@@ -1940,29 +2159,129 @@ async def lifespan(app: FastAPI):
     await close_redis()
 
 
+docs_kwargs = {}
+if settings.is_production:
+    docs_kwargs.update({
+        "docs_url": None,
+        "redoc_url": None,
+        "openapi_url": None,
+    })
+elif settings.DEBUG:
+    docs_kwargs.update({
+        "docs_url": "/api/docs",
+        "redoc_url": "/api/redoc",
+        "openapi_url": "/api/openapi.json",
+    })
+else:
+    docs_kwargs.update({
+        "docs_url": "/api/docs",
+        "redoc_url": "/api/redoc",
+        "openapi_url": "/api/openapi.json",
+    })
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.VERSION,
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
     lifespan=lifespan,
+    **docs_kwargs,
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=settings.allowed_hosts_list,
+)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+    start = time.monotonic()
+    response = await call_next(request)
+    elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+    response.headers["X-Request-ID"] = request_id
+    extra = {
+        "request_id": request_id,
+        "route": request.url.path,
+        "method": request.method,
+        "latency_ms": elapsed_ms,
+        "status_code": response.status_code,
+    }
+    user_id = getattr(request.state, "user_id", None)
+    if user_id:
+        extra["user_id"] = user_id
+    logger.info("request", extra=extra)
+    return response
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    request_id = getattr(request.state, "request_id", "unknown")
+    logger.error(
+        "Unhandled exception",
+        extra={"request_id": request_id, "route": request.url.path},
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "request_id": request_id},
+    )
+
 
 app.include_router(api_router, prefix="/api")
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "app": settings.APP_NAME, "version": settings.VERSION}
+    db_ok = False
+    redis_ok = False
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            db_ok = True
+    except Exception:
+        pass
+    try:
+        r = await get_redis()
+        await r.ping()
+        redis_ok = True
+    except Exception:
+        pass
+    all_ok = db_ok and redis_ok
+    status_code = 200 if all_ok else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "healthy" if all_ok else "degraded",
+            "app": settings.APP_NAME,
+            "version": settings.VERSION,
+            "database": "up" if db_ok else "down",
+            "redis": "up" if redis_ok else "down",
+        },
+    )
+
+
+@app.get("/ready")
+async def ready_check():
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        r = await get_redis()
+        await r.ping()
+        return {"status": "ready", "database": "up", "redis": "up"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "not ready"})
 
 ```
 
@@ -2596,7 +2915,7 @@ class StockEvent(BaseModel):
 ``` py
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, JSON
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Text, JSON, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.models.base import BaseModel
@@ -2618,6 +2937,7 @@ class User(BaseModel):
     is_premium = Column(Boolean, default=False, nullable=False)
     preferences = Column(JSON, default=dict, nullable=True)
     last_login = Column(DateTime(timezone=True), nullable=True)
+    token_version = Column(Integer, default=0, nullable=False)
 
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
     login_history = relationship("LoginHistory", back_populates="user", cascade="all, delete-orphan")
@@ -3054,7 +3374,7 @@ Focus on NSE/BSE listed stocks. Use Indian market terminology."""
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models.user import User, UserSession, LoginHistory
-from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
+from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token, revoke_token
 from app.schemas.user import UserCreate, UserLogin
 from fastapi import HTTPException, status
 from datetime import datetime, timezone, timedelta
@@ -3080,7 +3400,7 @@ class AuthService:
         await self.db.flush()
         await self.db.refresh(user)
 
-        tokens = self._generate_tokens(str(user.id))
+        tokens = self._generate_tokens(str(user.id), user.token_version)
         await self._log_login(user, "email", True)
         await self.db.commit()
 
@@ -3102,7 +3422,7 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
         user.last_login = datetime.now(timezone.utc)
-        tokens = self._generate_tokens(str(user.id))
+        tokens = self._generate_tokens(str(user.id), user.token_version)
         await self._log_login(user, "email", True, ip=ip)
         await self.db.commit()
 
@@ -3136,7 +3456,7 @@ class AuthService:
                 user.avatar_url = avatar_url
 
         user.last_login = datetime.now(timezone.utc)
-        tokens = self._generate_tokens(str(user.id))
+        tokens = self._generate_tokens(str(user.id), user.token_version)
         await self._log_login(user, "google", True)
         await self.db.commit()
 
@@ -3152,8 +3472,28 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
         user_id = payload.get("sub")
-        tokens = self._generate_tokens(user_id)
+        user = await self.get_user_by_id(user_id)
+        tokens = self._generate_tokens(user_id, user.token_version)
         return tokens
+
+    async def logout(self, token: str) -> None:
+        payload = decode_token(token)
+        if payload is None:
+            return
+        exp = payload.get("exp", 0)
+        now = datetime.now(timezone.utc).timestamp()
+        ttl = max(int(exp - now), 0)
+        if ttl > 0:
+            await revoke_token(token, ttl)
+
+    async def logout_all_sessions(self, user_id: str) -> None:
+        result = await self.db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        user.token_version = (user.token_version or 0) + 1
+        self.db.add(user)
+        await self.db.commit()
 
     async def get_user_by_id(self, user_id: str) -> User:
         result = await self.db.execute(select(User).where(User.id == user_id))
@@ -3162,10 +3502,10 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
         return user
 
-    def _generate_tokens(self, user_id: str) -> dict:
+    def _generate_tokens(self, user_id: str, token_version: int = 0) -> dict:
         return {
-            "access_token": create_access_token({"sub": user_id}),
-            "refresh_token": create_refresh_token({"sub": user_id}),
+            "access_token": create_access_token({"sub": user_id, "token_version": token_version}),
+            "refresh_token": create_refresh_token({"sub": user_id, "token_version": token_version}),
         }
 
     async def _log_login(self, user: User, login_type: str, success: bool, reason: Optional[str] = None, ip: Optional[str] = None):
@@ -3291,7 +3631,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
 from sqlalchemy.orm import joinedload
 from app.models.stock import Stock, StockPrice, StockFundamental
-from typing import Optional, List, Dict
+from app.core.redis_client import cached
+from app.core.pagination import encode_cursor, decode_cursor, CursorPage
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 
 
@@ -3299,17 +3641,40 @@ class StockService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def search_stocks(self, query: str, limit: int = 20) -> List[Stock]:
+    async def search_stocks(
+        self, query: str, limit: int = 20, cursor: Optional[str] = None
+    ) -> CursorPage[Dict[str, Any]]:
         stmt = (
             select(Stock)
             .filter(
                 Stock.is_active == True,
                 (Stock.symbol.ilike(f"%{query}%") | Stock.company_name.ilike(f"%{query}%"))
             )
-            .limit(limit)
+            .order_by(Stock.symbol)
+            .limit(limit + 1)
         )
+        if cursor:
+            decoded = decode_cursor(cursor)
+            if decoded:
+                stmt = stmt.filter(Stock.symbol > decoded)
+
         result = await self.db.execute(stmt)
-        return result.scalars().all()
+        rows = result.scalars().all()
+
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        items = [
+            {"id": str(s.id), "symbol": s.symbol, "company_name": s.company_name, "sector": s.sector}
+            for s in rows
+        ]
+
+        next_cursor = None
+        if has_more and rows:
+            next_cursor = encode_cursor(rows[-1].symbol)
+
+        return CursorPage(items=items, next_cursor=next_cursor, has_more=has_more)
 
     async def get_stock_by_symbol(self, symbol: str) -> Optional[Stock]:
         result = await self.db.execute(
@@ -3320,8 +3685,9 @@ class StockService:
         return result.scalar_one_or_none()
 
     async def get_stock_prices(
-        self, stock_id: str, interval: str = "1D", limit: int = 100
-    ) -> List[StockPrice]:
+        self, stock_id: str, interval: str = "1D", limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> CursorPage[Dict[str, Any]]:
         now = datetime.utcnow()
         if interval == "1D":
             since = now - timedelta(days=limit)
@@ -3339,56 +3705,86 @@ class StockService:
                 StockPrice.date >= since,
             )
             .order_by(StockPrice.date.asc())
-            .limit(limit)
+            .limit(limit + 1)
         )
+        if cursor:
+            decoded = decode_cursor(cursor)
+            if decoded:
+                try:
+                    cursor_date = datetime.fromisoformat(decoded)
+                    stmt = stmt.filter(StockPrice.date > cursor_date)
+                except ValueError:
+                    pass
+
         result = await self.db.execute(stmt)
-        return result.scalars().all()
+        rows = result.scalars().all()
 
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        items = [
+            {
+                "date": p.date.isoformat() if hasattr(p.date, 'isoformat') else str(p.date),
+                "open": p.open, "high": p.high, "low": p.low, "close": p.close,
+                "volume": p.volume, "delivery_percentage": p.delivery_percentage,
+                "vwap": p.vwap,
+            }
+            for p in rows
+        ]
+
+        next_cursor = None
+        if has_more and rows:
+            last_date = rows[-1].date
+            next_cursor = encode_cursor(
+                last_date.isoformat() if hasattr(last_date, 'isoformat') else str(last_date)
+            )
+
+        return CursorPage(items=items, next_cursor=next_cursor, has_more=has_more)
+
+    @cached(ttl=30, skip_args=1)
     async def get_market_overview(self, limit: int = 50) -> Dict:
-        nifty = await self._get_index_data("NIFTY")
-        sensex = await self._get_index_data("SENSEX")
-        banknifty = await self._get_index_data("BANKNIFTY")
-        vix = await self._get_index_data("INDIAVIX")
-
-        # Apply a hard cap of 500 for "all active stocks" scenarios
+        indices = await self._get_all_index_data()
         effective_limit = min(limit if limit > 0 else 500, 500)
         gainers = await self._get_top_movers("gainers", effective_limit)
         losers = await self._get_top_movers("losers", effective_limit)
         active = await self._get_most_active(effective_limit)
 
         return {
-            "indices": {"nifty": nifty, "sensex": sensex, "banknifty": banknifty, "vix": vix},
+            "indices": indices,
             "gainers": gainers,
             "losers": losers,
             "most_active": active,
         }
 
-    async def _get_index_data(self, symbol: str) -> Optional[Dict]:
+    async def _get_all_index_data(self) -> Dict[str, Optional[Dict]]:
         result = await self.db.execute(
-            select(Stock).filter(Stock.symbol == symbol, Stock.is_index == True)
+            select(Stock).filter(Stock.is_index == True)
         )
-        stock = result.scalar_one_or_none()
-        if not stock:
-            return None
+        index_stocks = result.scalars().all()
+        if not index_stocks:
+            return {"nifty": None, "sensex": None, "banknifty": None, "vix": None}
 
-        prices = await self.get_stock_prices(str(stock.id), "1D", 2)
-        if len(prices) < 2:
-            return None
-
-        latest = prices[-1]
-        prev = prices[-2]
-        change = latest.close - prev.close
-        change_percent = (change / prev.close) * 100
-
-        return {
-            "symbol": symbol,
-            "current_value": latest.close,
-            "change": round(change, 2),
-            "change_percent": round(change_percent, 2),
-            "high": latest.high,
-            "low": latest.low,
-            "is_up": change >= 0,
-        }
+        indices = {}
+        for stock in index_stocks:
+            prices = await self.get_stock_prices(str(stock.id), "1D", 2)
+            if len(prices.items) >= 2:
+                p = prices.items
+                latest, prev = p[-1], p[-2]
+                change = latest["close"] - prev["close"]
+                change_percent = (change / prev["close"]) * 100 if prev["close"] else 0
+                indices[stock.symbol.lower()] = {
+                    "symbol": stock.symbol,
+                    "current_value": latest["close"],
+                    "change": round(change, 2),
+                    "change_percent": round(change_percent, 2),
+                    "high": latest["high"],
+                    "low": latest["low"],
+                    "is_up": change >= 0,
+                }
+            else:
+                indices[stock.symbol.lower()] = None
+        return indices
 
     async def _get_top_movers(self, movers_type: str, limit: int) -> List[Dict]:
         subq = (
@@ -3523,13 +3919,13 @@ def _clean(val: Any) -> Any:
     return val
 
 
-def _to_series(prices: List[StockPrice]) -> pd.DataFrame:
+def _to_series(prices: List) -> pd.DataFrame:
     data = {
-        "open": [p.open for p in prices],
-        "high": [p.high for p in prices],
-        "low": [p.low for p in prices],
-        "close": [p.close for p in prices],
-        "volume": [p.volume for p in prices],
+        "open": [p["open"] if isinstance(p, dict) else p.open for p in prices],
+        "high": [p["high"] if isinstance(p, dict) else p.high for p in prices],
+        "low": [p["low"] if isinstance(p, dict) else p.low for p in prices],
+        "close": [p["close"] if isinstance(p, dict) else p.close for p in prices],
+        "volume": [p["volume"] if isinstance(p, dict) else p.volume for p in prices],
     }
     return pd.DataFrame(data)
 
@@ -3933,7 +4329,13 @@ def publish_to_redis(channel: str, data: dict):
         pass
 
 
-@celery_app.task
+@celery_app.task(
+    autoretry_for=(Exception,),
+    max_retries=2,
+    retry_backoff=True,
+    retry_backoff_max=30,
+    retry_jitter=True,
+)
 def check_all_alerts():
     engine = get_sync_engine()
     triggered = 0
@@ -4011,23 +4413,31 @@ def check_all_alerts():
 ``` py
 from app.workers.celery_app import celery_app
 
+BASE_RETRY = dict(
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 
-@celery_app.task
+
+@celery_app.task(**BASE_RETRY)
 def compute_technical_indicators(symbol: str):
     return {"status": "ok", "symbol": symbol, "indicators_computed": True}
 
 
-@celery_app.task
+@celery_app.task(**BASE_RETRY)
 def detect_patterns(symbol: str):
     return {"status": "ok", "symbol": symbol, "patterns_detected": True}
 
 
-@celery_app.task
+@celery_app.task(**BASE_RETRY)
 def run_backtest(strategy_id: str, symbol: str, start_date: str, end_date: str, initial_capital: float):
     return {"status": "ok", "strategy_id": strategy_id, "message": "Backtest queued"}
 
 
-@celery_app.task
+@celery_app.task(**BASE_RETRY)
 def generate_sentiment_analysis(news_id: str):
     return {"status": "ok", "news_id": news_id, "sentiment": "neutral"}
 
@@ -4099,7 +4509,14 @@ def fetch_one_stock(symbol_id, symbol):
         return None
 
 
-@celery_app.task(rate_limit="30/m")
+@celery_app.task(
+    rate_limit="30/m",
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 def fetch_live_prices():
     engine = get_sync_engine()
     stocks = []
@@ -4153,7 +4570,13 @@ def fetch_live_prices():
     return {"status": "ok", "stocks_updated": updated, "total_attempted": len(stocks), "successful": len(results)}
 
 
-@celery_app.task
+@celery_app.task(
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 def update_indices():
     engine = get_sync_engine()
     with Session(engine) as session:
@@ -4179,7 +4602,13 @@ def update_indices():
     return {"status": "ok", "indices": indices_data}
 
 
-@celery_app.task
+@celery_app.task(
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 def fetch_stock_fundamentals(symbol: str):
     try:
         yf_symbol = YFINANCE_MAP.get(symbol) or (symbol + YFINANCE_SUFFIX)
@@ -4244,7 +4673,13 @@ def fetch_stock_fundamentals(symbol: str):
         return {"status": "error", "symbol": symbol, "error": str(e)}
 
 
-@celery_app.task
+@celery_app.task(
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+    retry_jitter=True,
+)
 def fetch_company_news(symbol: str):
     try:
         yf_symbol = YFINANCE_MAP.get(symbol) or (symbol + YFINANCE_SUFFIX)
@@ -4349,9 +4784,9 @@ celery_app.conf.update(
 
 ### `backend/celerybeat-schedule`
 ``` 
-ϚW                                                               W                   =             L                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  M            L            =            
+ϚW                                                               W            N                   =             L             M                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  M            L            =            
             
-                                                 aentr          F                                                                                                                                                                                      '__ve            ^utc_H                                                    Ttz  +                            entries}.__version__	       5.6.3.tz       Asia/Kolkata.utc_enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                         entries      }(check-alertscelery.beat
+                                                 aentr          G                                                                                                                                                                                      '__ve            ^utc_H                                                    Ttz  +                            entries}.__version__	       5.6.3.tz       Asia/Kolkata.utc_enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                         entries      }(check-alertscelery.beat
 ScheduleEntry(h!app.tasks.alerts.check_all_alertsdatetimedatetimeC
 
 builtinsgetattrzoneinfoZoneInfo	_unpickleRAsia/KolkataKRRK celery.schedulesscheduleh	timedeltaK K<K RNR)}}tRupdate-indicesh(h%$app.tasks.market_data.update_indiceshC
@@ -4375,10 +4810,20 @@ hhK M,K RNR)}}tRfetch-market-datah(fetch-market-data'app.tasks.market_data
 
 LKhRK4hhK K<K RNR)}}tRu.                                                                                                                                                                                                                                                                                                                                                                                                                                                    entries;      }(check-alertscelery.beat
 ScheduleEntry(check-alerts!app.tasks.alerts.check_all_alertsdatetimedatetimeC
-builtinsgetattrzoneinfoZoneInfo	_unpickleRAsia/KolkataKRRKMcelery.schedulesscheduleh	timedeltaK KxK RNR)}}tRupdate-indicesh(update-indices$app.tasks.market_data.update_indicesh	C
-4
-hRKhhK MXK RNR)}}tRfetch-market-datah(fetch-market-data'app.tasks.market_data.fetch_live_pricesh	C
-hRK>hhK M,K RNR)}}tRu.                                                                                                                                                                                                                                                                                                                                                                                                                                                   
++:builtinsgetattrzoneinfoZoneInfo	_unpickleRAsia/KolkataKRRKcelery.schedulesscheduleh	timedeltaK KxK RNR)}}tRupdate-indicesh(update-indices$app.tasks.market_data.update_indicesh	C
+%:
+hRK4hhK MXK RNR)}}tRfetch-market-datah(fetch-market-data'app.tasks.market_data.fetch_live_pricesh	C
+*:KĔhRKhhK M,K RNR)}}tRu.                                                                                                                                                                                                                                                                                                                                                                                                                                                   entries<      }(check-alertscelery.beat
+ScheduleEntry(check-alerts!app.tasks.alerts.check_all_alertsdatetimedatetimeC
+/攌builtinsgetattrzoneinfoZoneInfo	_unpickleRAsia/KolkataKRRMcelery.schedulesscheduleh	timedeltaK KxK RNR)}}tRupdate-indicesh(update-indices$app.tasks.market_data.update_indicesh	C
+-hRKRhhK MXK RNR)}}tRfetch-market-datah(fetch-market-data'app.tasks.market_data.fetch_live_pricesh	C
+-1hRKhhK M,K RNR)}}tRu.                                                                                                                                                                                                                                                                                                                                                                                                                                                  
+```
+
+
+### `backend/conftest.py`
+``` py
+
 ```
 
 
@@ -4390,6 +4835,15 @@ hRKhhK MXK RNR)}}tRfetch-market-datah(fetch-market-data'app.tasks.market
   "requires": true,
   "packages": {}
 }
+
+```
+
+
+### `backend/pytest.ini`
+``` ini
+[pytest]
+asyncio_mode = auto
+asyncio_default_test_loop_scope = session
 
 ```
 
@@ -4431,6 +4885,7 @@ aiofiles>=23.2.1
 websockets>=12.0
 python-dateutil>=2.8.2
 tenacity>=8.2.3
+slowapi>=0.1.9
 
 ```
 
@@ -4657,12 +5112,24 @@ with Session(engine) as session:
 import pytest
 from httpx import AsyncClient, ASGITransport
 from app.main import app
+from app.core.database import Base, get_engine
+
+
+@pytest.fixture(scope="session", autouse=True)
+async def setup_database():
+    eng = get_engine()
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await eng.dispose()
 
 
 @pytest.fixture
 async def client():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
 
 
@@ -4688,13 +5155,355 @@ async def test_register(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_login(client: AsyncClient):
+    await client.post(
+        "/api/auth/register",
+        json={"email": "test2@example.com", "password": "testpass123", "full_name": "Test User"},
+    )
     response = await client.post(
         "/api/auth/login",
-        json={"email": "demo@tradeai.com", "password": "demo123"},
+        json={"email": "test2@example.com", "password": "testpass123"},
     )
     assert response.status_code == 200
     data = response.json()
     assert "access_token" in data
+
+
+@pytest.mark.asyncio
+async def test_logout(client: AsyncClient):
+    reg_resp = await client.post(
+        "/api/auth/register",
+        json={"email": "test3@example.com", "password": "testpass123", "full_name": "Test User"},
+    )
+    assert reg_resp.status_code == 200
+    token = reg_resp.json()["access_token"]
+
+    logout_resp = await client.post(
+        "/api/auth/logout",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert logout_resp.status_code == 200
+
+    me_resp = await client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert me_resp.status_code == 401
+
+```
+
+
+### `backend/tests/test_pagination.py`
+``` py
+import pytest
+from app.core.pagination import encode_cursor, decode_cursor, CursorPage
+
+
+class TestCursorCodec:
+    def test_encode_decode(self):
+        original = "some_cursor_value_123"
+        encoded = encode_cursor(original)
+        decoded = decode_cursor(encoded)
+        assert decoded == original
+
+    def test_encode_decode_with_special_chars(self):
+        original = "ABC-123_date:2024-01-01T00:00:00"
+        encoded = encode_cursor(original)
+        decoded = decode_cursor(encoded)
+        assert decoded == original
+
+    def test_decode_invalid(self):
+        assert decode_cursor("!!!invalid-base64!!!") is None
+
+    def test_decode_empty(self):
+        assert decode_cursor("") is None
+
+    def test_encode_is_url_safe(self):
+        encoded = encode_cursor("test/data+more")
+        assert "+" not in encoded
+        assert "/" not in encoded
+
+
+class TestCursorPage:
+    def test_empty_page(self):
+        page = CursorPage(items=[], has_more=False)
+        assert page.items == []
+        assert page.next_cursor is None
+        assert page.has_more is False
+        assert page.total is None
+
+    def test_page_with_items(self):
+        page = CursorPage(items=[1, 2, 3], next_cursor="abc", has_more=True, total=10)
+        assert page.items == [1, 2, 3]
+        assert page.next_cursor == "abc"
+        assert page.has_more is True
+        assert page.total == 10
+
+    def test_page_model_dump(self):
+        page = CursorPage(items=[{"id": 1}], next_cursor="xyz", has_more=True)
+        dumped = page.model_dump()
+        assert dumped == {
+            "items": [{"id": 1}],
+            "next_cursor": "xyz",
+            "has_more": True,
+            "total": None,
+        }
+
+```
+
+
+### `backend/tests/test_security.py`
+``` py
+import pytest
+from app.core.security import (
+    hash_password, verify_password,
+    create_access_token, create_refresh_token,
+    decode_token, verify_token,
+)
+
+
+class TestPasswordHashing:
+    def test_hash_and_verify(self):
+        password = "test_password_123"
+        hashed = hash_password(password)
+        assert hashed != password
+        assert verify_password(password, hashed) is True
+
+    def test_verify_wrong_password(self):
+        hashed = hash_password("correct_password")
+        assert verify_password("wrong_password", hashed) is False
+
+    def test_hash_is_different_each_time(self):
+        password = "same_password"
+        h1 = hash_password(password)
+        h2 = hash_password(password)
+        assert h1 != h2
+
+
+class TestTokenCreation:
+    def test_create_access_token(self):
+        token = create_access_token({"sub": "user-123"})
+        assert token is not None
+        assert isinstance(token, str)
+
+    def test_create_refresh_token(self):
+        token = create_refresh_token({"sub": "user-123"})
+        assert token is not None
+        assert isinstance(token, str)
+
+    def test_access_token_has_correct_type(self):
+        token = create_access_token({"sub": "user-123"})
+        payload = decode_token(token)
+        assert payload is not None
+        assert payload["type"] == "access"
+        assert payload["sub"] == "user-123"
+        assert "jti" in payload
+        assert "exp" in payload
+
+    def test_refresh_token_has_correct_type(self):
+        token = create_refresh_token({"sub": "user-123"})
+        payload = decode_token(token)
+        assert payload is not None
+        assert payload["type"] == "refresh"
+
+    def test_verify_token_valid(self):
+        token = create_access_token({"sub": "user-123"})
+        payload = verify_token(token, "access")
+        assert payload is not None
+        assert payload["sub"] == "user-123"
+
+    def test_verify_token_wrong_type(self):
+        token = create_access_token({"sub": "user-123"})
+        payload = verify_token(token, "refresh")
+        assert payload is None
+
+    def test_verify_invalid_token(self):
+        payload = verify_token("invalid.token.here", "access")
+        assert payload is None
+
+    def test_decode_expired_token(self):
+        import time
+        from datetime import timedelta
+        token = create_access_token({"sub": "user-123"}, expires_delta=timedelta(seconds=-1))
+        payload = decode_token(token)
+        assert payload is None
+
+    def test_token_contains_jti(self):
+        token = create_access_token({"sub": "user-123"})
+        payload = decode_token(token)
+        assert "jti" in payload
+        assert len(payload["jti"]) > 0
+
+    def test_each_token_has_unique_jti(self):
+        t1 = decode_token(create_access_token({"sub": "user-123"}))
+        t2 = decode_token(create_access_token({"sub": "user-123"}))
+        assert t1["jti"] != t2["jti"]
+
+```
+
+
+### `backend/tests/test_stock_api.py`
+``` py
+import pytest
+import uuid
+from datetime import datetime, timezone
+from httpx import AsyncClient, ASGITransport
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.main import app
+from app.core.database import Base, get_engine, get_db
+
+
+TEST_STOCK_ID = uuid.uuid4()
+
+
+@pytest.fixture(scope="session", autouse=True)
+async def setup_stock_data():
+    eng = get_engine()
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        now = datetime.now(timezone.utc)
+        await conn.execute(
+            text("""INSERT INTO stocks (id, symbol, company_name, sector, is_active, is_index, created_at, updated_at)
+                    VALUES (:id, 'TESTCO', 'Test Company Inc', 'Technology', TRUE, FALSE, :now, :now)
+                    ON CONFLICT (symbol) DO NOTHING"""),
+            {"id": TEST_STOCK_ID, "now": now},
+        )
+        stock_exists = await conn.execute(
+            text("SELECT id FROM stocks WHERE symbol = 'NIFTY'")
+        )
+        if not stock_exists.fetchone():
+            await conn.execute(
+                text("""INSERT INTO stocks (id, symbol, company_name, is_active, is_index, created_at, updated_at)
+                        VALUES (gen_random_uuid(), 'NIFTY', 'Nifty 50', TRUE, TRUE, :now, :now)"""),
+                {"now": now},
+            )
+        await conn.execute(
+            text("""INSERT INTO stock_prices (id, stock_id, date, open, high, low, close, volume, is_active, created_at, updated_at)
+                    VALUES (gen_random_uuid(), :sid, :dt, 100.0, 105.0, 99.0, 102.5, 100000, TRUE, :now, :now)
+                    ON CONFLICT DO NOTHING"""),
+            {"sid": TEST_STOCK_ID, "dt": datetime.now(timezone.utc).replace(tzinfo=None), "now": now},
+        )
+    yield
+    async with eng.begin() as conn:
+        await conn.execute(text("DELETE FROM stock_prices WHERE stock_id = :sid"), {"sid": TEST_STOCK_ID})
+        await conn.execute(text("DELETE FROM stocks WHERE id = :sid"), {"sid": TEST_STOCK_ID})
+    await eng.dispose()
+
+
+@pytest.fixture
+async def client():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        yield ac
+
+
+@pytest.mark.asyncio
+async def test_search_stocks(client: AsyncClient):
+    response = await client.get("/api/stocks/search", params={"query": "TESTCO"})
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    assert len(data) >= 1
+    assert data[0]["symbol"] == "TESTCO"
+
+
+@pytest.mark.asyncio
+async def test_search_stocks_partial(client: AsyncClient):
+    response = await client.get("/api/stocks/search", params={"query": "TEST"})
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) >= 1
+
+
+@pytest.mark.asyncio
+async def test_search_stocks_no_results(client: AsyncClient):
+    response = await client.get("/api/stocks/search", params={"query": "ZZZZNONEXISTENT"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data == []
+
+
+@pytest.mark.asyncio
+async def test_search_stocks_with_cursor(client: AsyncClient):
+    response = await client.get("/api/stocks/search", params={"query": "T", "cursor": "AAA", "limit": 5})
+    assert response.status_code == 200
+    data = response.json()
+    assert "items" in data
+    assert "has_more" in data
+    assert "next_cursor" in data
+
+
+@pytest.mark.asyncio
+async def test_get_stock_detail(client: AsyncClient):
+    response = await client.get("/api/stocks/TESTCO")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["symbol"] == "TESTCO"
+    assert data["company_name"] == "Test Company Inc"
+    assert "fundamentals" in data
+
+
+@pytest.mark.asyncio
+async def test_get_stock_detail_not_found(client: AsyncClient):
+    response = await client.get("/api/stocks/NONEXISTENT")
+    assert response.status_code == 200
+    assert "error" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_get_stock_prices(client: AsyncClient):
+    response = await client.get("/api/stocks/TESTCO/prices")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    if data:
+        assert "date" in data[0]
+        assert "close" in data[0]
+
+
+@pytest.mark.asyncio
+async def test_get_stock_prices_with_cursor(client: AsyncClient):
+    response = await client.get("/api/stocks/TESTCO/prices", params={"cursor": "AAA", "limit": 10})
+    assert response.status_code == 200
+    data = response.json()
+    assert "items" in data
+    assert "has_more" in data
+
+
+@pytest.mark.asyncio
+async def test_get_stock_technical(client: AsyncClient):
+    response = await client.get("/api/stocks/TESTCO/technical")
+    assert response.status_code == 200
+    data = response.json()
+    assert "rsi_14" in data
+    assert "sma_20" in data
+
+
+@pytest.mark.asyncio
+async def test_get_stock_patterns(client: AsyncClient):
+    response = await client.get("/api/stocks/TESTCO/patterns")
+    assert response.status_code == 200
+    data = response.json()
+    assert "candlestick_patterns" in data
+
+
+@pytest.mark.asyncio
+async def test_get_stock_fundamentals_not_found(client: AsyncClient):
+    response = await client.get("/api/stocks/TESTCO/fundamentals")
+    assert response.status_code == 200
+    data = response.json()
+    assert "error" in data
+
+
+@pytest.mark.asyncio
+async def test_market_overview(client: AsyncClient):
+    response = await client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    data = response.json()
+    assert "indices" in data
+    assert "gainers" in data
+    assert "losers" in data
+    assert "most_active" in data
 
 ```
 
@@ -9818,11 +10627,16 @@ export default {
 
 ### `frontend/src/App.tsx`
 ``` tsx
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { useSelector } from 'react-redux'
+import { useEffect } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
+import { useSelector, useDispatch } from 'react-redux'
 import type { RootState } from '@/store'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Toaster } from 'react-hot-toast'
+import { setNavigate, setLogoutHandler } from '@/lib/navigate'
+import { logout } from '@/store/authSlice'
 import Layout from '@/components/layout/Layout'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import Login from '@/pages/auth/Login'
 import Register from '@/pages/auth/Register'
 import Dashboard from '@/pages/dashboard/Dashboard'
@@ -9855,44 +10669,70 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+function AppInitializer() {
+  const dispatch = useDispatch()
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    setNavigate((path: string) => navigate(path, { replace: true }))
+    setLogoutHandler(() => dispatch(logout()))
+  }, [dispatch, navigate])
+
+  return null
+}
+
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <AppInitializer />
+          <Toaster
+            position="top-right"
+            toastOptions={{
+              duration: 4000,
+              style: {
+                background: 'hsl(var(--card))',
+                color: 'hsl(var(--foreground))',
+                border: '1px solid hsl(var(--border))',
+              },
+            }}
+          />
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/register" element={<Register />} />
 
-          <Route path="/" element={
-            <ProtectedRoute>
-              <Layout />
-            </ProtectedRoute>
-          }>
-            <Route index element={<Navigate to="/dashboard" replace />} />
-            <Route path="dashboard" element={<Dashboard />} />
-            <Route path="stocks" element={<Stocks />} />
-            <Route path="stocks/:symbol" element={<StockDetail />} />
-            <Route path="charts" element={<Charts />} />
-            <Route path="technical-analysis" element={<TechnicalAnalysis />} />
-            <Route path="scanner" element={<Scanner />} />
-            <Route path="watchlists" element={<Watchlists />} />
-            <Route path="portfolio" element={<Portfolio />} />
-            <Route path="backtesting" element={<Backtesting />} />
-            <Route path="alerts" element={<Alerts />} />
-            <Route path="ai-insights" element={<AIInsights />} />
-            <Route path="news" element={<News />} />
-            <Route path="learn" element={<Learning />} />
-            <Route path="admin" element={
-              <AdminRoute>
-                <Admin />
-              </AdminRoute>
-            } />
-          </Route>
+            <Route path="/" element={
+              <ProtectedRoute>
+                <Layout />
+              </ProtectedRoute>
+            }>
+              <Route index element={<Navigate to="/dashboard" replace />} />
+              <Route path="dashboard" element={<Dashboard />} />
+              <Route path="stocks" element={<Stocks />} />
+              <Route path="stocks/:symbol" element={<StockDetail />} />
+              <Route path="charts" element={<Charts />} />
+              <Route path="technical-analysis" element={<TechnicalAnalysis />} />
+              <Route path="scanner" element={<Scanner />} />
+              <Route path="watchlists" element={<Watchlists />} />
+              <Route path="portfolio" element={<Portfolio />} />
+              <Route path="backtesting" element={<Backtesting />} />
+              <Route path="alerts" element={<Alerts />} />
+              <Route path="ai-insights" element={<AIInsights />} />
+              <Route path="news" element={<News />} />
+              <Route path="learn" element={<Learning />} />
+              <Route path="admin" element={
+                <AdminRoute>
+                  <Admin />
+                </AdminRoute>
+              } />
+            </Route>
 
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
-        </Routes>
-      </BrowserRouter>
-    </QueryClientProvider>
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </QueryClientProvider>
+    </ErrorBoundary>
   )
 }
 
@@ -10487,6 +11327,95 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
 ```
 
 
+### `frontend/src/components/ui/ErrorBoundary.tsx`
+``` tsx
+import { Component, type ErrorInfo, type ReactNode } from 'react'
+import { AlertTriangle, RefreshCw, Home } from 'lucide-react'
+
+interface Props {
+  children: ReactNode
+  fallback?: ReactNode
+}
+
+interface State {
+  hasError: boolean
+  error: Error | null
+}
+
+export default class ErrorBoundary extends Component<Props, State> {
+  constructor(props: Props) {
+    super(props)
+    this.state = { hasError: false, error: null }
+  }
+
+  static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('ErrorBoundary caught:', error, errorInfo)
+  }
+
+  handleRetry = () => {
+    this.setState({ hasError: false, error: null })
+  }
+
+  handleGoHome = () => {
+    this.setState({ hasError: false, error: null })
+    window.location.href = '/dashboard'
+  }
+
+  render() {
+    if (this.state.hasError) {
+      if (this.props.fallback) {
+        return this.props.fallback
+      }
+
+      return (
+        <div className="flex items-center justify-center min-h-screen bg-background p-6">
+          <div className="max-w-md w-full glass rounded-xl p-8 text-center space-y-6">
+            <div className="mx-auto w-16 h-16 rounded-full bg-destructive/10 flex items-center justify-center">
+              <AlertTriangle className="w-8 h-8 text-destructive" />
+            </div>
+            <div className="space-y-2">
+              <h2 className="text-xl font-semibold">Something went wrong</h2>
+              <p className="text-sm text-muted-foreground">
+                An unexpected error occurred. Please try again or return to the dashboard.
+              </p>
+              {this.state.error && (
+                <p className="text-xs text-muted-foreground/60 font-mono mt-2 p-2 bg-muted/50 rounded">
+                  {this.state.error.message}
+                </p>
+              )}
+            </div>
+            <div className="flex gap-3 justify-center">
+              <button
+                onClick={this.handleRetry}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Try Again
+              </button>
+              <button
+                onClick={this.handleGoHome}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-border text-sm font-medium hover:bg-muted transition-colors"
+              >
+                <Home className="w-4 h-4" />
+                Go Home
+              </button>
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    return this.props.children
+  }
+}
+
+```
+
+
 ### `frontend/src/components/ui/badge.tsx`
 ``` tsx
 import * as React from 'react'
@@ -10685,7 +11614,7 @@ export function useWebSocket() {
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = window.location.host
-    const url = `${protocol}//${host}/ws/market`
+    const url = `${protocol}//${host}/api/ws/market`
 
     const ws = new WebSocket(url)
     wsRef.current = ws
@@ -10785,6 +11714,7 @@ export function useWebSocket() {
 ### `frontend/src/lib/api.ts`
 ``` ts
 import axios from 'axios'
+import { navigate, triggerLogout } from './navigate'
 
 const api = axios.create({
   baseURL: '/api',
@@ -10799,28 +11729,65 @@ api.interceptors.request.use((config) => {
   return config
 })
 
+let isRefreshing = false
+let failedQueue: Array<{
+  resolve: (token: string) => void
+  reject: (error: unknown) => void
+}> = []
+
+function processQueue(error: unknown, token: string | null = null) {
+  failedQueue.forEach(({ resolve, reject }) => {
+    if (error) {
+      reject(error)
+    } else {
+      resolve(token!)
+    }
+  })
+  failedQueue = []
+}
+
+function redirectToLogin() {
+  triggerLogout()
+  navigate('/login')
+}
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config
     const hadAuth = !!originalRequest?.headers?.Authorization
     if (error.response?.status === 401 && !originalRequest._retry && hadAuth) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject })
+        }).then((token) => {
+          originalRequest.headers.Authorization = `Bearer ${token}`
+          return api(originalRequest)
+        })
+      }
+
       originalRequest._retry = true
+      isRefreshing = true
+
       const refreshToken = localStorage.getItem('refresh_token')
       if (refreshToken) {
         try {
           const { data } = await axios.post('/api/auth/refresh', { refresh_token: refreshToken })
           localStorage.setItem('access_token', data.access_token)
           localStorage.setItem('refresh_token', data.refresh_token)
+          processQueue(null, data.access_token)
           originalRequest.headers.Authorization = `Bearer ${data.access_token}`
           return api(originalRequest)
-        } catch {
-          localStorage.removeItem('access_token')
-          localStorage.removeItem('refresh_token')
-          window.location.href = '/login'
+        } catch (err) {
+          processQueue(err, null)
+          redirectToLogin()
+          return Promise.reject(err)
+        } finally {
+          isRefreshing = false
         }
       } else {
-        window.location.href = '/login'
+        isRefreshing = false
+        redirectToLogin()
       }
     }
     return Promise.reject(error)
@@ -10926,6 +11893,37 @@ export const adminAPI = {
   createContent: (data: Record<string, unknown>) => api.post('/admin/learning/content', data),
   getLogs: () => api.get('/admin/logs'),
   getAuditLogs: () => api.get('/admin/audit-logs'),
+}
+
+```
+
+
+### `frontend/src/lib/navigate.ts`
+``` ts
+type NavigateFn = (path: string) => void
+
+let navigateFn: NavigateFn | null = null
+
+export function setNavigate(fn: NavigateFn) {
+  navigateFn = fn
+}
+
+export function navigate(path: string) {
+  if (navigateFn) {
+    navigateFn(path)
+  } else {
+    window.location.href = path
+  }
+}
+
+let logoutFn: (() => void) | null = null
+
+export function setLogoutHandler(fn: () => void) {
+  logoutFn = fn
+}
+
+export function triggerLogout() {
+  logoutFn?.()
 }
 
 ```
@@ -11989,6 +12987,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { dashboardAPI } from '@/lib/api'
 import { useAppSelector } from '@/store/hooks'
+import { selectConnected, selectLivePrices } from '@/store/marketSlice'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { TrendingUp, TrendingDown, Activity, Zap } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
@@ -12015,8 +13014,8 @@ export default function Dashboard() {
   const navigate = useNavigate()
   const [data, setData] = useState<MarketData | null>(null)
   const [loading, setLoading] = useState(true)
-  const wsConnected = useAppSelector((s) => s.market.connected)
-  const livePrices = useAppSelector((s) => Object.values(s.market.prices).slice(0, 500))
+  const wsConnected = useAppSelector(selectConnected)
+  const livePrices = useAppSelector(selectLivePrices)
   useWebSocket()
 
   useEffect(() => {
@@ -13350,7 +14349,8 @@ export type AppDispatch = typeof store.dispatch
 
 ### `frontend/src/store/marketSlice.ts`
 ``` ts
-import { createSlice, PayloadAction } from '@reduxjs/toolkit'
+import { createSlice, PayloadAction, createSelector } from '@reduxjs/toolkit'
+import type { RootState } from './index'
 
 export interface LivePrice {
   symbol: string
@@ -13417,6 +14417,18 @@ const marketSlice = createSlice({
 
 export const { setConnected, updatePrice, updateIndexData, updateIndices } = marketSlice.actions
 export default marketSlice.reducer
+
+const selectMarketState = (state: RootState) => state.market
+
+export const selectLivePrices = createSelector(
+  selectMarketState,
+  (market) => Object.values(market.prices).slice(0, 500),
+)
+
+export const selectConnected = createSelector(
+  selectMarketState,
+  (market) => market.connected,
+)
 
 ```
 
@@ -13708,6 +14720,13 @@ export interface BacktestStrategy {
   created_at: string
 }
 
+export interface CursorPage<T> {
+  items: T[]
+  next_cursor?: string
+  has_more: boolean
+  total?: number
+}
+
 export interface BacktestResult {
   id: string
   symbol: string
@@ -13864,10 +14883,12 @@ export default defineConfig({
       '/api': {
         target: 'http://backend:8000',
         changeOrigin: true,
+        ws: true,
       },
       '/ws': {
-        target: 'ws://backend:8000',
+        target: 'http://backend:8000',
         ws: true,
+        changeOrigin: true,
       },
     },
   },

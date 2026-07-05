@@ -1,10 +1,11 @@
+import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import {
   LayoutDashboard, TrendingUp, Search, Star, PieChart,
   Bell, Bot, Newspaper, BookOpen, Settings, Shield,
   BarChart3, LineChart, Activity, Database, LogOut,
-  X,
+  Sparkles, HelpCircle, ArrowUpDown, X,
 } from 'lucide-react'
 import { useDispatch } from 'react-redux'
 import { logout } from '@/store/authSlice'
@@ -18,7 +19,9 @@ interface SidebarProps {
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/advisor', icon: Sparkles, label: 'Advisor' },
   { to: '/stocks', icon: TrendingUp, label: 'Stocks' },
+  { to: '/movers', icon: ArrowUpDown, label: 'Movers' },
   { to: '/scanner', icon: Search, label: 'Scanner' },
   { to: '/charts', icon: BarChart3, label: 'Charts' },
   { to: '/technical-analysis', icon: Activity, label: 'Technical Analysis' },
@@ -29,6 +32,7 @@ const navItems = [
   { to: '/ai-insights', icon: Bot, label: 'AI Insights' },
   { to: '/news', icon: Newspaper, label: 'News' },
   { to: '/learn', icon: BookOpen, label: 'Learn' },
+  { to: '/faq', icon: HelpCircle, label: 'FAQs' },
   { to: '/admin', icon: Shield, label: 'Admin' },
 ]
 
@@ -39,6 +43,14 @@ const bottomItems = [
 export default function Sidebar({ open, onClose }: SidebarProps) {
   const dispatch = useDispatch()
   const navigate = useNavigate()
+  const [isDesktop, setIsDesktop] = useState(true)
+
+  useEffect(() => {
+    const check = () => setIsDesktop(window.innerWidth >= 1024)
+    check()
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [])
 
   const handleLogout = () => {
     dispatch(logout())
@@ -57,11 +69,11 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
         />
       )}
       <motion.aside
-        initial={{ x: -300 }}
-        animate={{ x: open ? 0 : -300 }}
+        initial={false}
+        animate={{ x: isDesktop ? 0 : (open ? 0 : -300) }}
         className={cn(
           'fixed top-0 left-0 z-50 h-full w-64 glass border-r border-border/50',
-          'lg:translate-x-0 lg:static lg:z-auto',
+          'lg:static lg:z-auto',
           'flex flex-col'
         )}
       >

@@ -1,9 +1,10 @@
 from fastapi import APIRouter
-from app.api.endpoints import auth, stocks, dashboard, scanner, watchlist, portfolio, alerts, backtest, ai, news, learning, admin, websocket
+from app.api.endpoints import auth, stocks, dashboard, scanner, watchlist, portfolio, alerts, backtest, ai, news, learning, admin, websocket, advisor
 
 router = APIRouter()
 
 router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+router.include_router(advisor.router, prefix="/advisor", tags=["Advisor"])
 router.include_router(stocks.router, prefix="/stocks", tags=["Stocks"])
 router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 router.include_router(scanner.router, prefix="/scanner", tags=["Scanner"])

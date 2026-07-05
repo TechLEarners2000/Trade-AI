@@ -107,8 +107,8 @@ export const dashboardAPI = {
   getOverview: (limit: number = 50) => api.get(`/dashboard/overview?limit=${limit}`),
   getNews: () => api.get('/dashboard/news'),
   getIndices: (historyDays: number = 30) => api.get(`/dashboard/indices?history_days=${historyDays}`),
-  getMovers: (type: string = 'gainers', limit: number = 50) =>
-    api.get(`/dashboard/market-movers?type=${type}&limit=${limit}`),
+  getMovers: (type: string = 'gainers', limit: number = 50, sector?: string) =>
+    api.get(`/dashboard/market-movers?type=${type}&limit=${limit}${sector ? `&sector=${sector}` : ''}`),
 }
 
 export const scannerAPI = {
@@ -178,4 +178,12 @@ export const adminAPI = {
   createContent: (data: Record<string, unknown>) => api.post('/admin/learning/content', data),
   getLogs: () => api.get('/admin/logs'),
   getAuditLogs: () => api.get('/admin/audit-logs'),
+}
+
+export const advisorAPI = {
+  getRanked: (limit: number = 50) => api.get(`/advisor/stocks?limit=${limit}`),
+  analyze: (symbol: string) => api.get(`/advisor/analyze/${symbol}`),
+  suggestInvestment: (amount: number) => api.post('/advisor/invest', { amount }),
+  checkSell: (symbol: string, buyPrice: number, quantity: number) =>
+    api.post('/advisor/sell-check', { symbol, buy_price: buyPrice, quantity }),
 }

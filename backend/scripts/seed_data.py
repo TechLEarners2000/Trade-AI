@@ -101,14 +101,14 @@ async def seed():
 
             # Generate price data
             base_price = random.uniform(100, 5000) if not is_index else random.uniform(1000, 80000)
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             for day in range(200):
                 date = now - timedelta(days=200 - day)
-                change = base_price * random.uniform(-0.03, 0.03)
-                open_price = base_price + change
+                change_pct = random.uniform(-0.03, 0.03)
+                open_price = base_price * (1 + change_pct)
                 high = open_price * (1 + random.uniform(0, 0.02))
                 low = open_price * (1 - random.uniform(0, 0.02))
-                close = random.uniform(low, high)
+                close = random.uniform(max(low, 0.01), high)
                 volume = int(random.uniform(100000, 5000000))
                 base_price = close
 
