@@ -21,7 +21,12 @@ class Settings(BaseSettings):
     @property
     def db_url(self) -> str:
         if self.DATABASE_URL:
-            return self.DATABASE_URL
+            url = self.DATABASE_URL
+            for prefix in ("postgresql://", "postgres://"):
+                if url.startswith(prefix) and "+asyncpg" not in url:
+                    url = url.replace(prefix, prefix.replace("://", "+asyncpg://"), 1)
+                    break
+            return url
         if not self.POSTGRES_PASSWORD:
             raise ValueError("Either DATABASE_URL or POSTGRES_PASSWORD must be set")
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
